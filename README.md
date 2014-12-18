@@ -29,3 +29,6 @@ https://github.com/viruscamp/CSerialPort
 * 修改 InitPort 中 portnr 取值范围，portnr>9 时特殊处理
 * 取消对 MFC 的依赖，使用 HWND 替代 CWnd，使用 win32 thread 函数而不是 MFC 的
 * 增加用户消息编号自定义，方法来自 CnComm
+
+by liquanhai on 2014-12-18
+* 增加一些处理措施，主要是对减少CPU占用率

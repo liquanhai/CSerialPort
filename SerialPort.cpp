@@ -14,7 +14,7 @@
 **  2007-12-25 mrlong    https://code.google.com/p/mycom/
 **  2011-11-06 liquanhai http://blog.csdn.net/liquanhai/article/details/6941574
 **  2013-12-04 viruscamp
-**
+**  2014-12-18 liquanhai
 */
 
 #include "stdafx.h"
