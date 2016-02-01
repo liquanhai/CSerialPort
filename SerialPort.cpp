@@ -14,14 +14,16 @@
 **  2007-12-25 mrlong    https://code.google.com/p/mycom/
 **  2011-11-06 liquanhai http://blog.csdn.net/liquanhai/article/details/6941574
 **  2013-12-04 viruscamp
-**  2014-12-18 liquanhai
+**  2014-01-10 itas      http://blog.csdn.net/itas109
+**  2014-12-18 liquanhai http://blog.csdn.net/liquanhai/article/details/6941574
 */
 
 #include "stdafx.h"
 #include "SerialPort.h"
 
 #include <assert.h>
- 
+
+int m_nComArray[20];
 //
 // Constructor
 //
@@ -30,6 +32,7 @@ CSerialPort::CSerialPort()
 	m_hComm = NULL;
 
 	// initialize overlapped structure members to zero
+	///初始化异步结构体
 	m_ov.Offset = 0;
 	m_ov.OffsetHigh = 0;
 
@@ -42,6 +45,7 @@ CSerialPort::CSerialPort()
 
 	m_bThreadAlive = FALSE;
 	m_nWriteSize = 1;
+	m_bIsSuspened = FALSE;
 }
 
 //
@@ -54,6 +58,7 @@ CSerialPort::~CSerialPort()
 		SetEvent(m_hShutdownEvent);
 	} while (m_bThreadAlive);
 
+// if the port is still opened: close it 
 	if (m_hComm != NULL)
 	{
 		CloseHandle(m_hComm);
@@ -73,8 +78,8 @@ CSerialPort::~CSerialPort()
 }
 
 //
-// Initialize the port. This can be port 1 to 4.
-//
+// Initialize the port. This can be port 1 to MaxSerialPortNum.
+///初始化串口。只能是1-MaxSerialPortNum
 //
 //parity:
 //  n=none
@@ -88,7 +93,7 @@ CSerialPort::~CSerialPort()
 //  1,1.5,2 
 //
 BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (receives message)
-						   UINT  portnr,		// portnumber (1..4)
+						   UINT  portnr,		// portnumber (1..MaxSerialPortNum)
 						   UINT  baud,			// baudrate
 						   char  parity,		// parity 
 						   UINT  databits,		// databits 
@@ -133,11 +138,13 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 		m_hShutdownEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
 	// initialize the event objects
+	///事件数组初始化，设定优先级别
 	m_hEventArray[0] = m_hShutdownEvent;	// highest priority
 	m_hEventArray[1] = m_ov.hEvent;
 	m_hEventArray[2] = m_hWriteEvent;
 
 	// initialize critical section
+	///初始化临界资源
 	InitializeCriticalSection(&m_csCommunicationSync);
 	
 	// set buffersize for writing and save the owner
@@ -156,10 +163,18 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	char *szPort = new char[50];
 	char *szBaud = new char[50];
 
+	
+	/*
+	多个线程操作相同的数据时，一般是需要按顺序访问的，否则会引导数据错乱，
+	无法控制数据，变成随机变量。为解决这个问题，就需要引入互斥变量，让每
+	个线程都按顺序地访问变量。这样就需要使用EnterCriticalSection和
+	LeaveCriticalSection函数。
+	*/
 	// now it critical!
 	EnterCriticalSection(&m_csCommunicationSync);
 
 	// if the port is already opened: close it
+	///串口已打开就关掉
 	if (m_hComm != NULL)
 	{
 		CloseHandle(m_hComm);
@@ -167,7 +182,7 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	}
 
 	// prepare port strings
-	sprintf(szPort, "\\\\.\\COM%d", portnr);
+	sprintf(szPort, "\\\\.\\COM%d", portnr);///可以显示COM10以上端口//add by itas109 2014-01-09
 
 	// stop is index 0 = 1 1=1.5 2=2
 	int mystop;
@@ -207,6 +222,17 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	sprintf(szBaud, "baud=%d parity=%c data=%d stop=%d", baud, parity, databits, mystop);
 
 	// get a handle to the port
+	/*
+	通信程序在CreateFile处指定串口设备及相关的操作属性，再返回一个句柄，
+	该句柄将被用于后续的通信操作，并贯穿整个通信过程串口打开后，其属性
+	被设置为默认值，根据具体需要，通过调用GetCommState(hComm,&&dcb)读取
+	当前串口设备控制块DCB设置，修改后通过SetCommState(hComm,&&dcb)将其写
+	入。运用ReadFile()与WriteFile()这两个API函数实现串口读写操作，若为异
+	步通信方式，两函数中最后一个参数为指向OVERLAPPED结构的非空指针，在读
+	写函数返回值为FALSE的情况下，调用GetLastError()函数，返回值为ERROR_IO_PENDING，
+	表明I/O操作悬挂，即操作转入后台继续执行。此时，可以用WaitForSingleObject()
+	来等待结束信号并设置最长等待时间
+	*/
 	m_hComm = CreateFile(szPort,						// communication port string (COMX)
 						 GENERIC_READ | GENERIC_WRITE,	// read/write types
 						 0,								// comm devices must be opened with exclusive access
@@ -215,6 +241,7 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 						 FILE_FLAG_OVERLAPPED,			// Async I/O
 						 0);							// template must be 0 for comm devices
 
+	///创建失败
 	if (m_hComm == INVALID_HANDLE_VALUE)
 	{
 		// port not found
@@ -225,6 +252,7 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	}
 
 	// set the timeout values
+	///设置超时
 	m_CommTimeouts.ReadIntervalTimeout		 = ReadIntervalTimeout * 1000;
 	m_CommTimeouts.ReadTotalTimeoutMultiplier  = ReadTotalTimeoutMultiplier * 1000;
 	m_CommTimeouts.ReadTotalTimeoutConstant	= ReadTotalTimeoutConstant * 1000;
@@ -232,11 +260,24 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	m_CommTimeouts.WriteTotalTimeoutConstant   = WriteTotalTimeoutConstant * 1000;
 
 	// configure
-	if (SetCommTimeouts(m_hComm, &m_CommTimeouts))
+	///配置
+	///分别调用Windows API设置串口参数
+	if (SetCommTimeouts(m_hComm, &m_CommTimeouts))///设置超时
 	{						   
-		if (SetCommMask(m_hComm, dwCommEvents))
+		/*
+		若对端口数据的响应时间要求较严格，可采用事件驱动方式。
+		事件驱动方式通过设置事件通知，当所希望的事件发生时，Windows
+		发出该事件已发生的通知，这与DOS环境下的中断方式很相似。Windows
+	    定义了9种串口通信事件，较常用的有以下三种：
+			EV_RXCHAR:接收到一个字节，并放入输入缓冲区；
+			EV_TXEMPTY:输出缓冲区中的最后一个字符，发送出去；
+			EV_RXFLAG:接收到事件字符(DCB结构中EvtChar成员)，放入输入缓冲区
+		在用SetCommMask()指定了有用的事件后，应用程序可调用WaitCommEvent()来等待事
+		件的发生。SetCommMask(hComm,0)可使WaitCommEvent()中止
+		*/
+		if (SetCommMask(m_hComm, dwCommEvents))///设置通信事件
 		{
-			if (GetCommState(m_hComm, &m_dcb))
+			if (GetCommState(m_hComm, &m_dcb))///获取当前DCB参数
 			{
 				m_dcb.EvtChar = 'q';
 				m_dcb.fRtsControl = RTS_CONTROL_ENABLE;		// set RTS bit high!
@@ -245,9 +286,9 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 				m_dcb.ByteSize = databits;
 				m_dcb.StopBits = mystop;
 						
-				//if (BuildCommDCB(szBaud, &m_dcb))
+				//if (BuildCommDCB(szBaud, &m_dcb))///填写DCB结构
 				//{
-					if (SetCommState(m_hComm, &m_dcb))
+					if (SetCommState(m_hComm, &m_dcb))///配置DCB
 						; // normal operation... continue
 					else
 						ProcessErrorMessage("SetCommState()");
@@ -268,9 +309,11 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	delete [] szBaud;
 
 	// flush the port
+	///终止读写并清空接收和发送
 	PurgeComm(m_hComm, PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT);
 
 	// release critical section
+	///释放临界资源
 	LeaveCriticalSection(&m_csCommunicationSync);
 
 	//TRACE("Initialisation for communicationport %d completed.\nUse Startmonitor to communicate.\n", portnr);
@@ -280,6 +323,9 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 
 //
 //  The CommThread Function.
+///线程函数
+///监视线程的大致流程：
+///检查串口-->进入循环{WaitCommEvent(不阻塞询问)询问事件-->如果有事件来到-->到相应处理(关闭\读\写)}
 //
 DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 {
@@ -289,6 +335,7 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 	
 	// Set the status variable in the dialog class to
 	// TRUE to indicate the thread is running.
+	///TRUE表示线程正在运行
 	port->m_bThreadAlive = TRUE;	
 		
 	// Misc. variables
@@ -300,10 +347,12 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 	BOOL  bResult = TRUE;
 		
 	// Clear comm buffers at startup
+	///开始时清除串口缓冲
 	if (port->m_hComm)		// check if the port is opened
 		PurgeComm(port->m_hComm, PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT);
 
 	// begin forever loop.  This loop will run as long as the thread is alive.
+	///只要线程存在就不断读取数据
 	for (;;) 
 	{ 
 
@@ -318,29 +367,38 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 
 		// we do this for each port!
 
-		bResult = WaitCommEvent(port->m_hComm, &Event, &port->m_ov);
+		/*
+		WaitCommEvent函数第3个参数1pOverlapped可以是一个OVERLAPPED结构的变量指针
+		，也可以是NULL，当用NULL时，表示该函数是同步的，否则表示该函数是异步的。
+		调用WaitCommEvent时，如果异步操作不能立即完成，会立即返回FALSE，系统在
+		WaitCommEvent返回前将OVERLAPPED结构成员hEvent设为无信号状态，等到产生通信
+		事件时，系统将其置有信号
+		*/
 
+		bResult = WaitCommEvent(port->m_hComm, &Event, &port->m_ov);///表示该函数是异步的
+		
 		if (!bResult)  
 		{ 
 			// If WaitCommEvent() returns FALSE, process the last error to determin
 			// the reason..
+			///如果WaitCommEvent返回Error为FALSE，则查询错误信息
 			switch (dwError = GetLastError()) 
 			{ 
-			case ERROR_IO_PENDING: 	
+			case ERROR_IO_PENDING: 	///正常情况，没有字符可读
 				{ 
 					// This is a normal return value if there are no bytes
 					// to read at the port.
 					// Do nothing and continue
 					break;
 				}
-			case 87:
+			case 87:///系统错误
 				{
 					// Under Windows NT, this value is returned for some reason.
 					// I have not investigated why, but it is also a valid reply
 					// Also do nothing and continue.
 					break;
 				}
-			default:
+			default:///发生其他错误，其中有串口读写中断开串口连接的错误
 				{
 					// All other error codes indicate a serious error has
 					// occured.  Process this error.
@@ -349,7 +407,7 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 				}
 			}
 		}
-		else
+		else	///WaitCommEvent()能正确返回
 		{
 			// If WaitCommEvent() returns TRUE, check to be sure there are
 			// actually bytes in the buffer to read.  
@@ -387,9 +445,14 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 				continue;
 		}	// end if bResult
 
+		///主等待函数，会阻塞线程
 		// Main wait function.  This function will normally block the thread
 		// until one of nine events occur that require action.
-		Event = WaitForMultipleObjects(3, port->m_hEventArray, FALSE, INFINITE);
+		///等待3个事件：关断/读/写，有一个事件发生就返回
+		Event = WaitForMultipleObjects(3, ///3个事件
+			port->m_hEventArray, ///事件数组
+			FALSE, ///有一个事件发生就返回
+			INFINITE);///超时时间
 
 		switch (Event)
 		{
@@ -397,7 +460,9 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 			{
 				// Shutdown event.  This is event zero so it will be
 				// the higest priority and be serviced first.
-
+				///关断事件，关闭串口
+				CloseHandle(port->m_hComm);
+				port->m_hComm=NULL;
 			 	port->m_bThreadAlive = FALSE;
 				
 				// Kill this thread.  break is not needed, but makes me feel better.
@@ -406,7 +471,7 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 
 				break;
 			}
-		case 1:	// read event
+		case 1:	// read event 将定义的各种消息发送出去
 			{
 				GetCommMask(port->m_hComm, &CommEvent);
 				if (CommEvent & EV_RXCHAR) //接收到字符，并置于输入缓冲区中 
@@ -425,10 +490,15 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 					
 				break;
 			}  
-		case 2: // write event
+		case 2: // write event 发送数据
 			{
 				// Write character event from port
 				WriteChar(port);
+				break;
+			}
+		default:
+			{
+				AfxMessageBox("接收有问题!");
 				break;
 			}
 
@@ -441,6 +511,7 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 
 //
 // start comm watching
+///开启监视线程
 //
 BOOL CSerialPort::StartMonitoring()
 {
@@ -453,6 +524,7 @@ BOOL CSerialPort::StartMonitoring()
 
 //
 // Restart the comm thread
+///复位监视线程
 //
 BOOL CSerialPort::RestartMonitoring()
 {
@@ -465,6 +537,7 @@ BOOL CSerialPort::RestartMonitoring()
 
 //
 // Suspend the comm thread
+///挂起监视线程
 //
 BOOL CSerialPort::StopMonitoring()
 {
@@ -477,6 +550,7 @@ BOOL CSerialPort::StopMonitoring()
 
 //
 // If there is a error, give the right message
+///如果有错误，给出提示
 //
 void CSerialPort::ProcessErrorMessage(char* ErrorText)
 {
@@ -610,6 +684,7 @@ void CSerialPort::ReceiveChar(CSerialPort* port)
 
 		// ClearCommError() will update the COMSTAT structure and
 		// clear any other errors.
+		///更新COMSTAT
 		
 		bResult = ClearCommError(port->m_hComm, &dwError, &comstat);
 
@@ -625,6 +700,7 @@ void CSerialPort::ReceiveChar(CSerialPort* port)
 		// as it is in my production code, but I have found this 
 		// solutiion to be the most efficient way to do this.
 		
+		///所有字符均被读出，中断循环
 		if (comstat.cbInQue == 0)
 		{
 			// break out when all bytes have been read
@@ -635,12 +711,14 @@ void CSerialPort::ReceiveChar(CSerialPort* port)
 
 		if (bRead)
 		{
+			///串口读出，读出缓冲区中字节
 			bResult = ReadFile(port->m_hComm,		// Handle to COMM port 
 							   &RXBuff,				// RX Buffer Pointer
 							   1,					// Read one byte
 							   &BytesRead,			// Stores number of bytes read
 							   &port->m_ov);		// pointer to the m_ov structure
 			// deal with the error code 
+			///若返回错误，错误处理
 			if (!bResult)  
 			{ 
 				switch (dwError = GetLastError()) 
@@ -649,6 +727,7 @@ void CSerialPort::ReceiveChar(CSerialPort* port)
 						{ 
 							// asynchronous i/o is still in progress 
 							// Proceed on to GetOverlappedResults();
+							///异步IO仍在进行
 							bRead = FALSE;
 							break;
 						}
@@ -657,16 +736,18 @@ void CSerialPort::ReceiveChar(CSerialPort* port)
 							// Another error has occured.  Process this error.
 							port->ProcessErrorMessage("ReadFile()");
 							break;
+							//return;///防止读写数据时，串口非正常断开导致死循环一直执行。add by itas109 2014-01-09 与上面liquanhai添加防死锁的代码差不多
 						} 
 				}
 			}
-			else
+			else///ReadFile返回TRUE
 			{
 				// ReadFile() returned complete. It is not necessary to call GetOverlappedResults()
 				bRead = TRUE;
 			}
 		}  // close if (bRead)
 
+		///异步IO操作仍在进行，需要调用GetOverlappedResult查询
 		if (!bRead)
 		{
 			bRead = TRUE;
@@ -736,6 +817,7 @@ BOOL CSerialPort::IsOpen()
 void CSerialPort::ClosePort()
 {
 	MSG message;
+	//add by liquanhai  防止死锁  2011-11-06
 	do
 	{
 		SetEvent(m_hShutdownEvent);
@@ -762,6 +844,11 @@ void CSerialPort::ClosePort()
 		ResetEvent(m_hWriteEvent);			
 		
 	//delete [] m_szWriteBuffer;
+	    if(m_szWriteBuffer != NULL)
+    {
+        delete [] m_szWriteBuffer;
+        m_szWriteBuffer = NULL;
+    }
 	
 }
 
@@ -830,4 +917,102 @@ BOOL CSerialPort::RecvData(LPTSTR lpszData, const int nSize)
 	}
 	
 	return TRUE;
+}
+//
+///查询注册表的串口号，将值存于数组中
+///本代码参考于mingojiang的获取串口逻辑名代码
+//
+void CSerialPort::QueryKey(HKEY hKey) 
+{ 
+	#define MAX_KEY_LENGTH 255
+	#define MAX_VALUE_NAME 16383
+	//	TCHAR    achKey[MAX_KEY_LENGTH];   // buffer for subkey name
+	//	DWORD    cbName;                   // size of name string 
+	TCHAR    achClass[MAX_PATH] = TEXT("");  // buffer for class name 
+	DWORD    cchClassName = MAX_PATH;  // size of class string 
+	DWORD    cSubKeys=0;               // number of subkeys 
+	DWORD    cbMaxSubKey;              // longest subkey size 
+	DWORD    cchMaxClass;              // longest class string 
+	DWORD    cValues;              // number of values for key 
+	DWORD    cchMaxValue;          // longest value name 
+	DWORD    cbMaxValueData;       // longest value data 
+	DWORD    cbSecurityDescriptor; // size of security descriptor 
+	FILETIME ftLastWriteTime;      // last write time 
+	
+	DWORD i, retCode; 
+	
+	TCHAR  achValue[MAX_VALUE_NAME]; 
+	DWORD cchValue = MAX_VALUE_NAME; 
+	
+	// Get the class name and the value count. 
+	retCode = RegQueryInfoKey(
+		hKey,                    // key handle 
+		achClass,                // buffer for class name 
+		&cchClassName,           // size of class string 
+		NULL,                    // reserved 
+		&cSubKeys,               // number of subkeys 
+		&cbMaxSubKey,            // longest subkey size 
+		&cchMaxClass,            // longest class string 
+		&cValues,                // number of values for this key 
+		&cchMaxValue,            // longest value name 
+		&cbMaxValueData,         // longest value data 
+		&cbSecurityDescriptor,   // security descriptor 
+		&ftLastWriteTime);       // last write time 
+	
+	for (i=0;i<20;i++)///存放串口号的数组初始化
+	{
+		m_nComArray[i] = -1;
+	}
+	
+	// Enumerate the key values. 
+	if (cValues > 0) {
+		for (i=0, retCode=ERROR_SUCCESS; i<cValues; i++) { 
+			cchValue = MAX_VALUE_NAME;  achValue[0] = '\0'; 
+			if (ERROR_SUCCESS == RegEnumValue(hKey, i, achValue, &cchValue, NULL, NULL, NULL, NULL))  { 
+				CString szName(achValue);
+				if (-1 != szName.Find(_T("Serial")) || -1 != szName.Find(_T("VCom")) ){
+					BYTE strDSName[10]; memset(strDSName, 0, 10);
+					DWORD nValueType = 0, nBuffLen = 10;
+					if (ERROR_SUCCESS == RegQueryValueEx(hKey, (LPCTSTR)achValue, NULL, &nValueType, strDSName, &nBuffLen)){
+						int nIndex = -1;
+						while(++nIndex < MaxSerialPortNum){
+							if (-1 == m_nComArray[nIndex]) {
+								m_nComArray[nIndex] = atoi((char*)(strDSName + 3));
+								break;
+							}
+						}
+					}
+				}
+			} 
+		}
+	}
+	else{
+		AfxMessageBox(_T("本机没有串口....."));
+	}
+	
+}
+
+void CSerialPort::Hkey2ComboBox(CComboBox& m_PortNO)
+{
+	HKEY hTestKey;
+	bool Flag = FALSE;
+	
+	///仅是XP系统的注册表位置，其他系统根据实际情况做修改
+	if(ERROR_SUCCESS == RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("HARDWARE\\DEVICEMAP\\SERIALCOMM"), 0, KEY_READ, &hTestKey) ){
+		QueryKey(hTestKey);
+	}
+	RegCloseKey(hTestKey);
+	
+	int i = 0;
+	m_PortNO.ResetContent();///刷新时，清空下拉列表内容
+	while(i < MaxSerialPortNum && -1 != m_nComArray[i]){
+		CString szCom; 
+		szCom.Format(_T("COM%d"), m_nComArray[i]);
+		m_PortNO.InsertString(i, szCom.GetBuffer(5));
+		++i;
+		Flag = TRUE;
+		if (Flag)///把第一个发现的串口设为下拉列表的默认值
+			m_PortNO.SetCurSel(0);
+	}
+	
 }

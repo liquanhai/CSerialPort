@@ -30,5 +30,13 @@ https://github.com/viruscamp/CSerialPort
 * 取消对 MFC 的依赖，使用 HWND 替代 CWnd，使用 win32 thread 函数而不是 MFC 的
 * 增加用户消息编号自定义，方法来自 CnComm
 
+
+by itas109 on 2014-01-10
+http://blog.csdn.net/itas109/article/details/18358297
+* 解决COM10以上端口无法显示的问题 
+* 扩展可选择端口，最大值MaxSerialPortNum可以自定义 
+* 添加QueryKey()和Hkey2ComboBox两个方法，用于自动查询当前有效的串口号。
+
+
 by liquanhai on 2014-12-18
 * 增加一些处理措施，主要是对减少CPU占用率

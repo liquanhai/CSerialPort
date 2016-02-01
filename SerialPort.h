@@ -36,6 +36,16 @@
 **	3) 修改 InitPort 中 portnr 取值范围，portnr>9 时特殊处理
 **	4) 取消对 MFC 的依赖，使用 HWND 替代 CWnd，使用 win32 thread 函数而不是 MFC 的
 **	5) 增加用户消息编号自定义，方法来自 CnComm
+*************************************************************************************** 
+***************************************************************************************
+**  author: itas109  date:2014-01-10
+**  Blog：blog.csdn.net/itas109
+**
+**  改进
+**    1) 解决COM10以上端口无法显示的问题
+**    2) 扩展可选择端口，最大值MaxSerialPortNum可以自定义
+**    3) 添加QueryKey()和Hkey2ComboBox两个方法，用于自动查询当前有效的串口号。
+** 
 */
 
 #ifndef __SERIALPORT_H__
@@ -55,6 +65,7 @@
 #define WM_COMM_RXFLAG_DETECTED		WM_COMM_MSG_BASE + 8	// The event character was received and placed in the input buffer.  
 #define WM_COMM_TXEMPTY_DETECTED	WM_COMM_MSG_BASE + 9	// The last character in the output buffer was sent.  
 
+#define MaxSerialPortNum 20   ///有效的串口总个数，不是串口的号 //add by itas109 2014-01-09
 class CSerialPort
 {														 
 public:
@@ -74,54 +85,64 @@ public:
 				DWORD WriteTotalTimeoutConstant = 1000);
 
 	// start/stop comm watching
-	BOOL		StartMonitoring();
-	BOOL		RestartMonitoring();
-	BOOL		StopMonitoring();
+	///控制串口监视线程
+	BOOL		 StartMonitoring();//开始监听
+	BOOL		 RestartMonitoring();//重新监听
+	BOOL		 StopMonitoring();//停止监听
 
-	DWORD		GetWriteBufferSize();
-	DWORD		GetCommEvents();
-	DCB			GetDCB();
+	DWORD		 GetWriteBufferSize();///获取写缓冲大小
+	DWORD		 GetCommEvents();///获取事件
+	DCB			 GetDCB();///获取DCB
 
+///写数据到串口
 	void		WriteToPort(char* string);
 	void		WriteToPort(char* string,int n); // add by mrlong 2007-12-25
 	void		WriteToPort(LPCTSTR string);	 // add by mrlong 2007-12-25
+    void		WriteToPort(LPCTSTR string,int n);//add by mrlong 2007-12-2
 	void		WriteToPort(BYTE* Buffer, int n);// add by mrlong
 	void		ClosePort();					 // add by mrlong 2007-12-2  
 	BOOL		IsOpen();
 
 	void SendData(LPCTSTR lpszData, const int nLength);   //串口发送函数 by mrlong 2008-2-15
 	BOOL RecvData(LPTSTR lpszData, const int nSize);	  //串口接收函数 by mrlong 2008-2-15
+	void QueryKey(HKEY hKey);///查询注册表的串口号，将值存于数组中
+	void Hkey2ComboBox(CComboBox& m_PortNO);///将QueryKey查询到的串口号添加到CComboBox控件中
 
 protected:
 	// protected memberfunctions
-	void		ProcessErrorMessage(char* ErrorText);
-	static DWORD WINAPI CommThread(LPVOID pParam);
+	void		ProcessErrorMessage(char* ErrorText);///错误处理
+	static DWORD WINAPI CommThread(LPVOID pParam);///线程函数
 	static void	ReceiveChar(CSerialPort* port);
 	static void	WriteChar(CSerialPort* port);
 
 	// thread
 	//CWinThread*			m_Thread;
 	HANDLE			  m_Thread;
+	BOOL                m_bIsSuspened;///thread监视线程是否挂起
 
 	// synchronisation objects
-	CRITICAL_SECTION	m_csCommunicationSync;
-	BOOL				m_bThreadAlive;
+	CRITICAL_SECTION	m_csCommunicationSync;///临界资源
+	BOOL				m_bThreadAlive;///监视线程运行标志
 
 	// handles
 	HANDLE				m_hShutdownEvent;  //stop发生的事件
-	HANDLE				m_hComm;		   // read  
+	HANDLE				m_hComm;		   // 串口句柄 
 	HANDLE				m_hWriteEvent;	 // write
 
 	// Event array. 
 	// One element is used for each event. There are two event handles for each port.
 	// A Write event and a receive character event which is located in the overlapped structure (m_ov.hEvent).
 	// There is a general shutdown when the port is closed. 
+	///事件数组，包括一个写事件，接收事件，关闭事件
+	///一个元素用于一个事件。有两个事件线程处理端口。
+	///写事件和接收字符事件位于overlapped结构体（m_ov.hEvent）中
+	///当端口关闭时，有一个通用的关闭。
 	HANDLE				m_hEventArray[3];
 
 	// structures
-	OVERLAPPED			m_ov;
-	COMMTIMEOUTS		m_CommTimeouts;
-	DCB					m_dcb;
+	OVERLAPPED			m_ov;///异步I/O
+	COMMTIMEOUTS		m_CommTimeouts;///超时设置
+	DCB					m_dcb;///设备控制块
 
 	// owner window
 	//CWnd*				m_pOwner;
@@ -130,11 +151,11 @@ protected:
 
 	// misc
 	UINT				m_nPortNr;		//?????
-	char*				m_szWriteBuffer;
+	char*				m_szWriteBuffer;///写缓冲区
 	DWORD				m_dwCommEvents;
-	DWORD				m_nWriteBufferSize;
+	DWORD				m_nWriteBufferSize;///写缓冲大小
 
-	int				 m_nWriteSize; //add by mrlong 2007-12-25
+	int				 m_nWriteSize;//写入字节数 //add by mrlong 2007-12-25
 };
 
 #endif __SERIALPORT_H__
