@@ -95,7 +95,7 @@ CSerialPort::~CSerialPort()
 BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (receives message)
 						   UINT  portnr,		// portnumber (1..MaxSerialPortNum)
 						   UINT  baud,			// baudrate
-						   char  parity,		// parity 
+							TCHAR  parity,		// parity 
 						   UINT  databits,		// databits 
 						   UINT  stopbits,		// stopbits 
 						   DWORD dwCommEvents,	// EV_RXCHAR, EV_CTS etc
@@ -152,7 +152,7 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 
 	if (m_szWriteBuffer != NULL)
 		delete [] m_szWriteBuffer;
-	m_szWriteBuffer = new char[writebuffersize];
+	m_szWriteBuffer = new BYTE[writebuffersize];
 
 	m_nPortNr = portnr;
 
@@ -160,8 +160,8 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	m_dwCommEvents = dwCommEvents;
 
 	BOOL bResult = FALSE;
-	char *szPort = new char[50];
-	char *szBaud = new char[50];
+	TCHAR *szPort = new TCHAR[50];
+	TCHAR *szBaud = new TCHAR[50];
 
 	
 	/*
@@ -182,7 +182,8 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	}
 
 	// prepare port strings
-	sprintf(szPort, "\\\\.\\COM%d", portnr);///可以显示COM10以上端口//add by itas109 2014-01-09
+	//sprintf(szPort, "\\\\.\\COM%d", portnr);///可以显示COM10以上端口//add by itas109 2014-01-09
+	_stprintf_s(szPort, sizeof(szPort), _T("\\\\.\\COM%d"), portnr);
 
 	// stop is index 0 = 1 1=1.5 2=2
 	int mystop;
@@ -203,24 +204,24 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	parity = toupper(parity);
 	switch(parity)
 	{
-		case 'N':
+		case _T('N'):
 			myparity = 0;
 			break;
-		case 'O':
+		case _T('O'):
 			myparity = 1;
 			break;
-		case 'E':
+		case _T('E'):
 			myparity = 2;
 			break;
-		case 'M':
+		case _T('M'):
 			myparity = 3;
 			break;
-		case 'S':
+		case _T('S'):
 			myparity = 4;
 			break;
 	}
-	sprintf(szBaud, "baud=%d parity=%c data=%d stop=%d", baud, parity, databits, mystop);
-
+	//sprintf(szBaud, "baud=%d parity=%c data=%d stop=%d", baud, parity, databits, mystop);
+	_stprintf_s(szBaud,sizeof(szBaud),_T("baud=%d parity=%c data=%d stop=%d"), baud, parity, databits, mystop);
 	// get a handle to the port
 	/*
 	通信程序在CreateFile处指定串口设备及相关的操作属性，再返回一个句柄，
@@ -291,19 +292,19 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 					if (SetCommState(m_hComm, &m_dcb))///配置DCB
 						; // normal operation... continue
 					else
-						ProcessErrorMessage("SetCommState()");
+						ProcessErrorMessage(_T("SetCommState()"));
 				//}
 				//else
 				//	ProcessErrorMessage("BuildCommDCB()");
 			}
 			else
-				ProcessErrorMessage("GetCommState()");
+				ProcessErrorMessage(_T("GetCommState()"));
 		}
 		else
-			ProcessErrorMessage("SetCommMask()");
+			ProcessErrorMessage(_T("SetCommMask()"));
 	}
 	else
-		ProcessErrorMessage("SetCommTimeouts()");
+		ProcessErrorMessage(_T("SetCommTimeouts()"));
 
 	delete [] szPort;
 	delete [] szBaud;
@@ -402,7 +403,7 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 				{
 					// All other error codes indicate a serious error has
 					// occured.  Process this error.
-					port->ProcessErrorMessage("WaitCommEvent()");
+					port->ProcessErrorMessage(_T("WaitCommEvent()"));
 					break;
 				}
 			}
@@ -498,7 +499,7 @@ DWORD WINAPI CSerialPort::CommThread(LPVOID pParam)
 			}
 		default:
 			{
-				AfxMessageBox("接收有问题!");
+				AfxMessageBox(_T("接收有问题!"));
 				break;
 			}
 
@@ -552,9 +553,9 @@ BOOL CSerialPort::StopMonitoring()
 // If there is a error, give the right message
 ///如果有错误，给出提示
 //
-void CSerialPort::ProcessErrorMessage(char* ErrorText)
+void CSerialPort::ProcessErrorMessage(TCHAR* ErrorText)
 {
-	char *Temp = new char[200];
+	TCHAR Temp[200] = { 0 };
 	
 	LPVOID lpMsgBuf;
 
@@ -568,11 +569,12 @@ void CSerialPort::ProcessErrorMessage(char* ErrorText)
 		NULL 
 	);
 
-	sprintf(Temp, "WARNING:  %s Failed with the following error: \n%s\nPort: %d\n", (char*)ErrorText, lpMsgBuf, m_nPortNr); 
-	MessageBox(NULL, Temp, "Application Error", MB_ICONSTOP);
+	//sprintf(Temp, "WARNING:  %s Failed with the following error: \n%s\nPort: %d\n", ErrorText, lpMsgBuf, m_nPortNr); 
+	_stprintf_s(Temp, sizeof(Temp), _T("WARNING:  %s Failed with the following error: \n%s\nPort: %d\n"), ErrorText,(TCHAR*) lpMsgBuf, m_nPortNr);
+	MessageBox(NULL, Temp, _T("Application Error"), MB_ICONSTOP);
 
 	LocalFree(lpMsgBuf);
-	delete[] Temp;
+	//delete[] Temp;
 }
 
 //
@@ -584,7 +586,11 @@ void CSerialPort::WriteChar(CSerialPort* port)
 	BOOL bResult = TRUE;
 
 	DWORD BytesSent = 0;
+#pragma warning(push)
+#pragma warning(disable:4267)
 	DWORD SendLen   = port->m_nWriteSize;
+#pragma warning(pop)
+
 	ResetEvent(port->m_hWriteEvent);
 
 
@@ -623,7 +629,7 @@ void CSerialPort::WriteChar(CSerialPort* port)
 				default:
 					{
 						// all other error codes
-						port->ProcessErrorMessage("WriteFile()");
+						port->ProcessErrorMessage(_T("WriteFile()"));
 					}
 			}
 		} 
@@ -647,7 +653,7 @@ void CSerialPort::WriteChar(CSerialPort* port)
 		// deal with the error code 
 		if (!bResult)  
 		{
-			port->ProcessErrorMessage("GetOverlappedResults() in WriteFile()");
+			port->ProcessErrorMessage(_T("GetOverlappedResults() in WriteFile()"));
 		}	
 	} // end if (!bWrite)
 
@@ -734,7 +740,7 @@ void CSerialPort::ReceiveChar(CSerialPort* port)
 					default:
 						{
 							// Another error has occured.  Process this error.
-							port->ProcessErrorMessage("ReadFile()");
+							port->ProcessErrorMessage(_T("ReadFile()"));
 							break;
 							//return;///防止读写数据时，串口非正常断开导致死循环一直执行。add by itas109 2014-01-09 与上面liquanhai添加防死锁的代码差不多
 						} 
@@ -759,7 +765,7 @@ void CSerialPort::ReceiveChar(CSerialPort* port)
 			// deal with the error code 
 			if (!bResult)  
 			{
-				port->ProcessErrorMessage("GetOverlappedResults() in ReadFile()");
+				port->ProcessErrorMessage(_T("GetOverlappedResults() in ReadFile()"));
 			}	
 		}  // close if (!bRead)
 				
@@ -774,16 +780,16 @@ void CSerialPort::ReceiveChar(CSerialPort* port)
 //
 // Write a string to the port
 //
-void CSerialPort::WriteToPort(char* string)
-{		
-	assert(m_hComm != 0);
-
-	memset(m_szWriteBuffer, 0, sizeof(m_szWriteBuffer));
-	strcpy(m_szWriteBuffer, string);
-	m_nWriteSize=strlen(string); // add by mrlong
-	// set event for write
-	SetEvent(m_hWriteEvent);
-}
+//void CSerialPort::WriteToPort(char* string)
+//{		
+//	assert(m_hComm != 0);
+//
+//	memset(m_szWriteBuffer, 0, m_nWriteBufferSize);
+//	strcpy_s((char*)m_szWriteBuffer, m_nWriteBufferSize,string);
+//	m_nWriteSize=strlen(string); // add by mrlong
+//	// set event for write
+//	SetEvent(m_hWriteEvent);
+//}
 
 //
 // Return the device control block
@@ -852,36 +858,40 @@ void CSerialPort::ClosePort()
 	
 }
 
-void CSerialPort::WriteToPort(char* string,int n)
+void CSerialPort::WriteToPort(char* string,size_t nBytesOfTheBuffer)
 {
 	assert(m_hComm != 0);
-	memset(m_szWriteBuffer, 0, sizeof(m_szWriteBuffer));
-	memcpy(m_szWriteBuffer, string, n);
-	m_nWriteSize = n;
+	memset(m_szWriteBuffer, 0, m_nWriteBufferSize);
+	//memcpy(m_szWriteBuffer, string, n);
+	StringCbCopyA((char*)m_szWriteBuffer, m_nWriteBufferSize, string);
+
+	m_nWriteSize = nBytesOfTheBuffer;
 
 	// set event for write
 	SetEvent(m_hWriteEvent);
 }
 
-void CSerialPort::WriteToPort(LPCTSTR string)
-{
-	assert(m_hComm != 0);
-	memset(m_szWriteBuffer, 0, sizeof(m_szWriteBuffer));
-	strcpy(m_szWriteBuffer, string);
-	m_nWriteSize=strlen(string);
-	// set event for write
-	SetEvent(m_hWriteEvent);
-}
+//void CSerialPort::WriteToPort(char* string)
+//{
+//	assert(m_hComm != 0);
+//	memset(m_szWriteBuffer, 0, m_nWriteBufferSize);
+//	strcpy_s((char*)m_szWriteBuffer, m_nWriteBufferSize, string);
+//	m_nWriteSize=strlen(string);
+//	// set event for write
+//	SetEvent(m_hWriteEvent);
+//}
 
-void CSerialPort::WriteToPort(BYTE* Buffer, int n)
+void CSerialPort::WriteToPort(PBYTE Buffer, size_t n)
 {
 	assert(m_hComm != 0);
-	memset(m_szWriteBuffer, 0, sizeof(m_szWriteBuffer));
-	int i;
-	for(i=0; i<n; i++)
-	{
-		m_szWriteBuffer[i] = Buffer[i];
-	}
+	memset(m_szWriteBuffer, 0, m_nWriteBufferSize);
+	memcpy(m_szWriteBuffer, Buffer, n);
+
+	//int i;
+	//for(i=0; i<n; i++)
+	//{
+	//	m_szWriteBuffer[i] = Buffer[i];
+	//}
 	m_nWriteSize=n;
 
 	// set event for write
@@ -889,17 +899,19 @@ void CSerialPort::WriteToPort(BYTE* Buffer, int n)
 }
 
 
-void CSerialPort::SendData(LPCTSTR lpszData, const int nLength)
+void CSerialPort::SendData(const PBYTE lpszData, DWORD nLength)
 {
 	assert(m_hComm != 0);
-	memset(m_szWriteBuffer, 0, nLength);
-	strcpy(m_szWriteBuffer, lpszData);
+	memset(m_szWriteBuffer, 0, m_nWriteBufferSize);
+	//strcpy_s((char*)m_szWriteBuffer, m_nWriteBufferSize,lpszData);
+	memcpy(m_szWriteBuffer, lpszData, nLength);
+
 	m_nWriteSize=nLength;
 	// set event for write
 	SetEvent(m_hWriteEvent);
 }
 
-BOOL CSerialPort::RecvData(LPTSTR lpszData, const int nSize)
+BOOL CSerialPort::RecvData(PBYTE lpszData, DWORD nSize)
 {
 	//
 	//接收数据
@@ -912,10 +924,7 @@ BOOL CSerialPort::RecvData(LPTSTR lpszData, const int nSize)
 		if(!ReadFile(m_hComm,lpszData,nSize,&mylen2,NULL)) 
 			return FALSE;
 		mylen += mylen2;
-
-		
 	}
-	
 	return TRUE;
 }
 //
