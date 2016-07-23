@@ -40,3 +40,6 @@ http://blog.csdn.net/itas109/article/details/18358297
 
 by liquanhai on 2014-12-18
 * 增加一些处理措施，主要是对减少CPU占用率
+
+by lvlinkeji on 2016-7-23
+* 修正了部分BUG，支持ANSI和Unicode编码，使用了一些安全的函数，支持VS2015正常编译。
