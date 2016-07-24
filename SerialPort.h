@@ -75,7 +75,7 @@ public:
 
 	// port initialisation											
 	BOOL		InitPort(HWND pPortOwner, UINT portnr = 1, UINT baud = 19200, 
-				char parity = 'N', UINT databits = 8, UINT stopsbits = 1, 
+				TCHAR parity = _T('N'), UINT databits = 8, UINT stopsbits = 1, 
 				DWORD dwCommEvents = EV_RXCHAR | EV_CTS, UINT nBufferSize = 512,
 			
 				DWORD ReadIntervalTimeout = 1000,
@@ -95,22 +95,22 @@ public:
 	DCB			 GetDCB();///获取DCB
 
 ///写数据到串口
-	void		WriteToPort(char* string);
-	void		WriteToPort(char* string,int n); // add by mrlong 2007-12-25
-	void		WriteToPort(LPCTSTR string);	 // add by mrlong 2007-12-25
-    void		WriteToPort(LPCTSTR string,int n);//add by mrlong 2007-12-2
-	void		WriteToPort(BYTE* Buffer, int n);// add by mrlong
+	//void		WriteToPort(char* string);
+	void		WriteToPort(char* string,size_t nBytesOfTheBuffer); // add by mrlong 2007-12-25
+	//void		WriteToPort(char* string);	 // add by mrlong 2007-12-25
+    //void		WriteToPort(char* string,int n);//add by mrlong 2007-12-2
+	void		WriteToPort(PBYTE Buffer, size_t n);// add by mrlong
 	void		ClosePort();					 // add by mrlong 2007-12-2  
 	BOOL		IsOpen();
 
-	void SendData(LPCTSTR lpszData, const int nLength);   //串口发送函数 by mrlong 2008-2-15
-	BOOL RecvData(LPTSTR lpszData, const int nSize);	  //串口接收函数 by mrlong 2008-2-15
+	void SendData(const PBYTE lpszData, DWORD nLength);   //串口发送函数 by mrlong 2008-2-15
+	BOOL RecvData(PBYTE lpszData, DWORD nSize);	  //串口接收函数 by mrlong 2008-2-15
 	void QueryKey(HKEY hKey);///查询注册表的串口号，将值存于数组中
 	void Hkey2ComboBox(CComboBox& m_PortNO);///将QueryKey查询到的串口号添加到CComboBox控件中
 
 protected:
 	// protected memberfunctions
-	void		ProcessErrorMessage(char* ErrorText);///错误处理
+	void		ProcessErrorMessage(TCHAR* ErrorText);///错误处理
 	static DWORD WINAPI CommThread(LPVOID pParam);///线程函数
 	static void	ReceiveChar(CSerialPort* port);
 	static void	WriteChar(CSerialPort* port);
@@ -151,11 +151,11 @@ protected:
 
 	// misc
 	UINT				m_nPortNr;		//?????
-	char*				m_szWriteBuffer;///写缓冲区
+	PBYTE				m_szWriteBuffer;///写缓冲区
 	DWORD				m_dwCommEvents;
 	DWORD				m_nWriteBufferSize;///写缓冲大小
 
-	int				 m_nWriteSize;//写入字节数 //add by mrlong 2007-12-25
+	size_t				 m_nWriteSize;//写入字节数 //add by mrlong 2007-12-25
 };
 
 #endif __SERIALPORT_H__
