@@ -160,8 +160,8 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 	m_dwCommEvents = dwCommEvents;
 
 	BOOL bResult = FALSE;
-	TCHAR *szPort = new TCHAR[50];
-	TCHAR *szBaud = new TCHAR[50];
+	TCHAR *szPort = new TCHAR[MAX_PATH];
+	TCHAR *szBaud = new TCHAR[MAX_PATH];
 
 	
 	/*
@@ -183,7 +183,7 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 
 	// prepare port strings
 	//sprintf(szPort, "\\\\.\\COM%d", portnr);///可以显示COM10以上端口//add by itas109 2014-01-09
-	_stprintf_s(szPort, sizeof(szPort), _T("\\\\.\\COM%d"), portnr);
+	_stprintf_s(szPort, MAX_PATH, _T("\\\\.\\COM%d"), portnr);
 
 	// stop is index 0 = 1 1=1.5 2=2
 	int mystop;
@@ -201,7 +201,7 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 			break;
 	}
 	myparity = 0;
-	parity = toupper(parity);
+	//parity = _totupper(parity);
 	switch(parity)
 	{
 		case _T('N'):
@@ -221,7 +221,7 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 			break;
 	}
 	//sprintf(szBaud, "baud=%d parity=%c data=%d stop=%d", baud, parity, databits, mystop);
-	_stprintf_s(szBaud,sizeof(szBaud),_T("baud=%d parity=%c data=%d stop=%d"), baud, parity, databits, mystop);
+	_stprintf_s(szBaud, MAX_PATH,_T("baud=%d parity=%c data=%d stop=%d"), baud, parity, databits, mystop);
 	// get a handle to the port
 	/*
 	通信程序在CreateFile处指定串口设备及相关的操作属性，再返回一个句柄，
