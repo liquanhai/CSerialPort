@@ -282,20 +282,20 @@ BOOL CSerialPort::InitPort(HWND pPortOwner,	// the owner (CWnd) of the port (rec
 			{
 				m_dcb.EvtChar = 'q';
 				m_dcb.fRtsControl = RTS_CONTROL_ENABLE;		// set RTS bit high!
-				m_dcb.BaudRate = baud;  // add by mrlong
-				m_dcb.Parity   = myparity;
-				m_dcb.ByteSize = databits;
-				m_dcb.StopBits = mystop;
+				//m_dcb.BaudRate = baud;  // add by mrlong
+				//m_dcb.Parity   = myparity;
+				//m_dcb.ByteSize = databits;
+				//m_dcb.StopBits = mystop;
 						
-				//if (BuildCommDCB(szBaud, &m_dcb))///填写DCB结构
-				//{
+				if (BuildCommDCB(szBaud, &m_dcb))///填写DCB结构
+				{
 					if (SetCommState(m_hComm, &m_dcb))///配置DCB
 						; // normal operation... continue
 					else
 						ProcessErrorMessage(_T("SetCommState()"));
-				//}
-				//else
-				//	ProcessErrorMessage("BuildCommDCB()");
+				}
+				else
+					ProcessErrorMessage(_T("BuildCommDCB()"));
 			}
 			else
 				ProcessErrorMessage(_T("GetCommState()"));
@@ -976,7 +976,7 @@ void CSerialPort::QueryKey(HKEY hKey)
 	// Enumerate the key values. 
 	if (cValues > 0) {
 		for (i=0, retCode=ERROR_SUCCESS; i<cValues; i++) { 
-			cchValue = MAX_VALUE_NAME;  achValue[0] = '\0'; 
+			cchValue = MAX_VALUE_NAME;  achValue[0] = _T('\0'); 
 			if (ERROR_SUCCESS == RegEnumValue(hKey, i, achValue, &cchValue, NULL, NULL, NULL, NULL))  { 
 				CString szName(achValue);
 				if (-1 != szName.Find(_T("Serial")) || -1 != szName.Find(_T("VCom")) ){
@@ -986,7 +986,7 @@ void CSerialPort::QueryKey(HKEY hKey)
 						int nIndex = -1;
 						while(++nIndex < MaxSerialPortNum){
 							if (-1 == m_nComArray[nIndex]) {
-								m_nComArray[nIndex] = atoi((char*)(strDSName + 3));
+								m_nComArray[nIndex] = _wtoi((wchar_t*)(strDSName + 3));//这里如果出问题，那么改为m_nComArray[nIndex] = _wtoi((wchar_t*)(strDSName + 3*sizeof(TCHAR)));
 								break;
 							}
 						}
