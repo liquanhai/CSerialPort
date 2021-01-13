@@ -1,5 +1,6 @@
 CSerialPort
 ===========
+2021-01-13 the typical demo to use this class: https://github.com/liquanhai/LSDComm
 
 First Version by Remon Spekreijse on 2000-02-08
 http://www.codeguru.com/cpp/i-n/network/serialcommunications/article.php/c2483/A-communication-class-for-serial-port.htm
