@@ -1,161 +1,468 @@
-/*
-**	FILENAME			CSerialPort.h
-**
-**	PURPOSE				This class can read, write and watch one serial port.
-**						It sends messages to its owner when something happends on the port
-**						The class creates a thread for reading and writing so the main
-**						program is not blocked.
-**
-**	CREATION DATE		15-09-1997
-**	LAST MODIFICATION	12-11-1997
-**
-**	AUTHOR				Remon Spekreijse
-**
-**
-************************************************************************************
-**  author: mrlong date:2007-12-25
-**
-**  ¸Ä½ø
-**	1) Ôö¼Ó ClosePort
-**	2) Ôö¼Ó WriteToPort Á½¸ö·½·¨
-**	3) Ôö¼Ó SendData Óë RecvData ·½·¨
-**************************************************************************************
-***************************************************************************************
-**  author£ºliquanhai date:2011-11-06
-**
-**  ¸Ä½ø
-**	1) Ôö¼Ó ClosePort ÖĞ½»³ö¿ØÖÆÈ¨£¬·ÀÖ¹ËÀËøÎÊÌâ
-**	2) Ôö¼Ó ReceiveChar ÖĞ·ÀÖ¹Ïß³ÌËÀËø
-**************************************************************************************
-***************************************************************************************
-**  author£ºviruscamp date:2013-12-04
-**
-**  ¸Ä½ø
-**	1) Ôö¼Ó IsOpen ÅĞ¶ÏÊÇ·ñ´ò¿ª
-**	2) ĞŞÕı InitPort ÖĞ parity Odd Even ²ÎÊıÈ¡Öµ´íÎó
-**	3) ĞŞ¸Ä InitPort ÖĞ portnr È¡Öµ·¶Î§£¬portnr>9 Ê±ÌØÊâ´¦Àí
-**	4) È¡Ïû¶Ô MFC µÄÒÀÀµ£¬Ê¹ÓÃ HWND Ìæ´ú CWnd£¬Ê¹ÓÃ win32 thread º¯Êı¶ø²»ÊÇ MFC µÄ
-**	5) Ôö¼ÓÓÃ»§ÏûÏ¢±àºÅ×Ô¶¨Òå£¬·½·¨À´×Ô CnComm
-*************************************************************************************** 
-***************************************************************************************
-**  author: itas109  date:2014-01-10
-**  Blog£ºblog.csdn.net/itas109
-**
-**  ¸Ä½ø
-**    1) ½â¾öCOM10ÒÔÉÏ¶Ë¿ÚÎŞ·¨ÏÔÊ¾µÄÎÊÌâ
-**    2) À©Õ¹¿ÉÑ¡Ôñ¶Ë¿Ú£¬×î´óÖµMaxSerialPortNum¿ÉÒÔ×Ô¶¨Òå
-**    3) Ìí¼ÓQueryKey()ºÍHkey2ComboBoxÁ½¸ö·½·¨£¬ÓÃÓÚ×Ô¶¯²éÑ¯µ±Ç°ÓĞĞ§µÄ´®¿ÚºÅ¡£
-** 
-*/
+/**
+ * @file SerialPort.h
+ * @brief ç°ä»£C++è·¨å¹³å°ä¸²å£é€šä¿¡åº“
+ * @author CSerialPort Team
+ * @version 3.0.0
+ * @date 2026-01-01
+ * 
+ * @details
+ * æœ¬åº“ä½¿ç”¨ç°ä»£C++17ç‰¹æ€§é‡å†™ï¼Œæ”¯æŒWindowså’ŒLinuxåŒå¹³å°ã€‚
+ * 
+ * ä¸»è¦ç‰¹æ€§ï¼š
+ * - è·¨å¹³å°æ”¯æŒï¼ˆWindows/Linuxï¼‰
+ * - RAIIèµ„æºç®¡ç†
+ * - çº¿ç¨‹å®‰å…¨è®¾è®¡
+ * - å¼‚æ­¥I/Oæ“ä½œ
+ * - å›è°ƒæœºåˆ¶
+ * - æ™ºèƒ½æŒ‡é’ˆç®¡ç†
+ * 
+ * @copyright MIT License
+ */
 
-#ifndef __SERIALPORT_H__
-#define __SERIALPORT_H__
+#ifndef CSERIALPORT_H
+#define CSERIALPORT_H
 
-#ifndef WM_COMM_MSG_BASE 
-	#define WM_COMM_MSG_BASE		WM_USER + 617		//!< ÏûÏ¢±àºÅµÄ»ùµã  
+// ============================================================================
+// å¹³å°æ£€æµ‹
+// ============================================================================
+#if defined(_WIN32) || defined(_WIN64)
+    #define CSERIALPORT_PLATFORM_WINDOWS 1
+    #define CSERIALPORT_PLATFORM_LINUX 0
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
+    #define CSERIALPORT_PLATFORM_WINDOWS 0
+    #define CSERIALPORT_PLATFORM_LINUX 1
+#else
+    #error "Unsupported platform"
 #endif
 
-#define WM_COMM_BREAK_DETECTED		WM_COMM_MSG_BASE + 1	// A break was detected on input.
-#define WM_COMM_CTS_DETECTED		WM_COMM_MSG_BASE + 2	// The CTS (clear-to-send) signal changed state. 
-#define WM_COMM_DSR_DETECTED		WM_COMM_MSG_BASE + 3	// The DSR (data-set-ready) signal changed state. 
-#define WM_COMM_ERR_DETECTED		WM_COMM_MSG_BASE + 4	// A line-status error occurred. Line-status errors are CE_FRAME, CE_OVERRUN, and CE_RXPARITY. 
-#define WM_COMM_RING_DETECTED		WM_COMM_MSG_BASE + 5	// A ring indicator was detected. 
-#define WM_COMM_RLSD_DETECTED		WM_COMM_MSG_BASE + 6	// The RLSD (receive-line-signal-detect) signal changed state. 
-#define WM_COMM_RXCHAR				WM_COMM_MSG_BASE + 7	// A character was received and placed in the input buffer. 
-#define WM_COMM_RXFLAG_DETECTED		WM_COMM_MSG_BASE + 8	// The event character was received and placed in the input buffer.  
-#define WM_COMM_TXEMPTY_DETECTED	WM_COMM_MSG_BASE + 9	// The last character in the output buffer was sent.  
+// ============================================================================
+// æ ‡å‡†åº“å¤´æ–‡ä»¶
+// ============================================================================
+#include <string>
+#include <vector>
+#include <memory>
+#include <functional>
+#include <optional>
+#include <chrono>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <future>
+#include <queue>
+#include <cstdint>
+#include <stdexcept>
 
-#define MaxSerialPortNum 20   ///ÓĞĞ§µÄ´®¿Ú×Ü¸öÊı£¬²»ÊÇ´®¿ÚµÄºÅ //add by itas109 2014-01-09
-class CSerialPort
-{														 
-public:
-	// contruction and destruction
-	CSerialPort();
-	virtual		~CSerialPort();
+// ============================================================================
+// å¹³å°ç‰¹å®šå¤´æ–‡ä»¶
+// ============================================================================
+#if CSERIALPORT_PLATFORM_WINDOWS
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+#elif CSERIALPORT_PLATFORM_LINUX
+    #include <termios.h>
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <sys/ioctl.h>
+    #include <sys/select.h>
+    #include <errno.h>
+    #include <dirent.h>
+#endif
 
-	// port initialisation											
-	BOOL		InitPort(HWND pPortOwner, UINT portnr = 1, UINT baud = 19200, 
-				char parity = 'N', UINT databits = 8, UINT stopsbits = 1, 
-				DWORD dwCommEvents = EV_RXCHAR | EV_CTS, UINT nBufferSize = 512,
-			
-				DWORD ReadIntervalTimeout = 1000,
-				DWORD ReadTotalTimeoutMultiplier = 1000,
-				DWORD ReadTotalTimeoutConstant = 1000,
-				DWORD WriteTotalTimeoutMultiplier = 1000,
-				DWORD WriteTotalTimeoutConstant = 1000);
+namespace csp {
 
-	// start/stop comm watching
-	///¿ØÖÆ´®¿Ú¼àÊÓÏß³Ì
-	BOOL		 StartMonitoring();//¿ªÊ¼¼àÌı
-	BOOL		 RestartMonitoring();//ÖØĞÂ¼àÌı
-	BOOL		 StopMonitoring();//Í£Ö¹¼àÌı
+// ============================================================================
+// ç‰ˆæœ¬ä¿¡æ¯
+// ============================================================================
+constexpr int VERSION_MAJOR = 3;
+constexpr int VERSION_MINOR = 0;
+constexpr int VERSION_PATCH = 0;
+constexpr const char* VERSION_STRING = "3.0.0";
 
-	DWORD		 GetWriteBufferSize();///»ñÈ¡Ğ´»º³å´óĞ¡
-	DWORD		 GetCommEvents();///»ñÈ¡ÊÂ¼ş
-	DCB			 GetDCB();///»ñÈ¡DCB
+// ============================================================================
+// æšä¸¾ç±»å‹å®šä¹‰
+// ============================================================================
 
-///Ğ´Êı¾İµ½´®¿Ú
-	void		WriteToPort(char* string);
-	void		WriteToPort(char* string,int n); // add by mrlong 2007-12-25
-	void		WriteToPort(LPCTSTR string);	 // add by mrlong 2007-12-25
-    void		WriteToPort(LPCTSTR string,int n);//add by mrlong 2007-12-2
-	void		WriteToPort(BYTE* Buffer, int n);// add by mrlong
-	void		ClosePort();					 // add by mrlong 2007-12-2  
-	BOOL		IsOpen();
-
-	void SendData(LPCTSTR lpszData, const int nLength);   //´®¿Ú·¢ËÍº¯Êı by mrlong 2008-2-15
-	BOOL RecvData(LPTSTR lpszData, const int nSize);	  //´®¿Ú½ÓÊÕº¯Êı by mrlong 2008-2-15
-	void QueryKey(HKEY hKey);///²éÑ¯×¢²á±íµÄ´®¿ÚºÅ£¬½«Öµ´æÓÚÊı×éÖĞ
-	void Hkey2ComboBox(CComboBox& m_PortNO);///½«QueryKey²éÑ¯µ½µÄ´®¿ÚºÅÌí¼Óµ½CComboBox¿Ø¼şÖĞ
-
-protected:
-	// protected memberfunctions
-	void		ProcessErrorMessage(char* ErrorText);///´íÎó´¦Àí
-	static DWORD WINAPI CommThread(LPVOID pParam);///Ïß³Ìº¯Êı
-	static void	ReceiveChar(CSerialPort* port);
-	static void	WriteChar(CSerialPort* port);
-
-	// thread
-	//CWinThread*			m_Thread;
-	HANDLE			  m_Thread;
-	BOOL                m_bIsSuspened;///thread¼àÊÓÏß³ÌÊÇ·ñ¹ÒÆğ
-
-	// synchronisation objects
-	CRITICAL_SECTION	m_csCommunicationSync;///ÁÙ½ç×ÊÔ´
-	BOOL				m_bThreadAlive;///¼àÊÓÏß³ÌÔËĞĞ±êÖ¾
-
-	// handles
-	HANDLE				m_hShutdownEvent;  //stop·¢ÉúµÄÊÂ¼ş
-	HANDLE				m_hComm;		   // ´®¿Ú¾ä±ú 
-	HANDLE				m_hWriteEvent;	 // write
-
-	// Event array. 
-	// One element is used for each event. There are two event handles for each port.
-	// A Write event and a receive character event which is located in the overlapped structure (m_ov.hEvent).
-	// There is a general shutdown when the port is closed. 
-	///ÊÂ¼şÊı×é£¬°üÀ¨Ò»¸öĞ´ÊÂ¼ş£¬½ÓÊÕÊÂ¼ş£¬¹Ø±ÕÊÂ¼ş
-	///Ò»¸öÔªËØÓÃÓÚÒ»¸öÊÂ¼ş¡£ÓĞÁ½¸öÊÂ¼şÏß³Ì´¦Àí¶Ë¿Ú¡£
-	///Ğ´ÊÂ¼şºÍ½ÓÊÕ×Ö·ûÊÂ¼şÎ»ÓÚoverlapped½á¹¹Ìå£¨m_ov.hEvent£©ÖĞ
-	///µ±¶Ë¿Ú¹Ø±ÕÊ±£¬ÓĞÒ»¸öÍ¨ÓÃµÄ¹Ø±Õ¡£
-	HANDLE				m_hEventArray[3];
-
-	// structures
-	OVERLAPPED			m_ov;///Òì²½I/O
-	COMMTIMEOUTS		m_CommTimeouts;///³¬Ê±ÉèÖÃ
-	DCB					m_dcb;///Éè±¸¿ØÖÆ¿é
-
-	// owner window
-	//CWnd*				m_pOwner;
-	HWND				m_pOwner;
-
-
-	// misc
-	UINT				m_nPortNr;		//?????
-	char*				m_szWriteBuffer;///Ğ´»º³åÇø
-	DWORD				m_dwCommEvents;
-	DWORD				m_nWriteBufferSize;///Ğ´»º³å´óĞ¡
-
-	int				 m_nWriteSize;//Ğ´Èë×Ö½ÚÊı //add by mrlong 2007-12-25
+/**
+ * @brief æ³¢ç‰¹ç‡æšä¸¾
+ */
+enum class BaudRate : uint32_t {
+    BR_110    = 110,
+    BR_300    = 300,
+    BR_600    = 600,
+    BR_1200   = 1200,
+    BR_2400   = 2400,
+    BR_4800   = 4800,
+    BR_9600   = 9600,
+    BR_14400  = 14400,
+    BR_19200  = 19200,
+    BR_38400  = 38400,
+    BR_57600  = 57600,
+    BR_115200 = 115200,
+    BR_230400 = 230400,
+    BR_460800 = 460800,
+    BR_921600 = 921600,
+    Custom    = 0
 };
 
-#endif __SERIALPORT_H__
+/**
+ * @brief æ•°æ®ä½æšä¸¾
+ */
+enum class DataBits : uint8_t {
+    Five  = 5,
+    Six   = 6,
+    Seven = 7,
+    Eight = 8
+};
+
+/**
+ * @brief åœæ­¢ä½æšä¸¾
+ */
+enum class StopBits : uint8_t {
+    One     = 1,
+    OneHalf = 2,
+    Two     = 3
+};
+
+/**
+ * @brief æ ¡éªŒä½æšä¸¾
+ */
+enum class Parity : uint8_t {
+    None  = 0,
+    Odd   = 1,
+    Even  = 2,
+    Mark  = 3,
+    Space = 4
+};
+
+/**
+ * @brief æµæ§åˆ¶æšä¸¾
+ */
+enum class FlowControl : uint8_t {
+    None     = 0,
+    Hardware = 1,
+    Software = 2
+};
+
+/**
+ * @brief é”™è¯¯ç æšä¸¾
+ */
+enum class ErrorCode : int {
+    Success = 0,
+    Unknown = 1,
+    InvalidParameter = 2,
+    NotOpen = 3,
+    AlreadyOpen = 4,
+    Timeout = 5,
+    OpenFailed = 100,
+    CloseFailed = 101,
+    PortNotFound = 102,
+    PermissionDenied = 103,
+    PortBusy = 104,
+    ConfigFailed = 200,
+    ReadFailed = 300,
+    WriteFailed = 301,
+    BufferOverflow = 302
+};
+
+/**
+ * @brief ä¸²å£äº‹ä»¶ç±»å‹
+ */
+enum class EventType : uint8_t {
+    DataReceived = 1,
+    DataSent = 2,
+    Error = 3,
+    BreakDetected = 4,
+    CtsChanged = 5,
+    DsrChanged = 6
+};
+
+// ============================================================================
+// ç±»å‹åˆ«å
+// ============================================================================
+using Byte = uint8_t;
+using ByteBuffer = std::vector<Byte>;
+using Duration = std::chrono::milliseconds;
+using DataCallback = std::function<void(const Byte* data, size_t size)>;
+using EventCallback = std::function<void(EventType event)>;
+using ErrorCallback = std::function<void(ErrorCode error, const std::string& message)>;
+
+// ============================================================================
+// ç»“æ„ä½“å®šä¹‰
+// ============================================================================
+
+/**
+ * @brief ä¸²å£é…ç½®ç»“æ„ä½“
+ */
+struct SerialConfig {
+    BaudRate baudRate = BaudRate::BR_9600;
+    DataBits dataBits = DataBits::Eight;
+    StopBits stopBits = StopBits::One;
+    Parity parity = Parity::None;
+    FlowControl flowControl = FlowControl::None;
+    uint32_t customBaudRate = 0;
+    Duration readTimeout = Duration(1000);
+    Duration writeTimeout = Duration(1000);
+    size_t readBufferSize = 4096;
+    size_t writeBufferSize = 4096;
+    
+    uint32_t getBaudRateValue() const noexcept {
+        return (baudRate == BaudRate::Custom) ? customBaudRate : static_cast<uint32_t>(baudRate);
+    }
+    
+    static SerialConfig defaultConfig() noexcept { return SerialConfig{}; }
+    
+    static SerialConfig config_9600_8N1() noexcept {
+        SerialConfig cfg;
+        cfg.baudRate = BaudRate::BR_9600;
+        cfg.dataBits = DataBits::Eight;
+        cfg.stopBits = StopBits::One;
+        cfg.parity = Parity::None;
+        return cfg;
+    }
+    
+    static SerialConfig config_115200_8N1() noexcept {
+        SerialConfig cfg;
+        cfg.baudRate = BaudRate::BR_115200;
+        cfg.dataBits = DataBits::Eight;
+        cfg.stopBits = StopBits::One;
+        cfg.parity = Parity::None;
+        return cfg;
+    }
+};
+
+/**
+ * @brief ä¸²å£ä¿¡æ¯ç»“æ„ä½“
+ */
+struct PortInfo {
+    std::string portName;
+    std::string description;
+    std::string hardwareId;
+    bool isAvailable = true;
+    
+    std::string displayName() const {
+        return description.empty() ? portName : portName + " - " + description;
+    }
+};
+
+/**
+ * @brief ä¸²å£ç»Ÿè®¡ä¿¡æ¯
+ */
+struct PortStatistics {
+    uint64_t bytesReceived = 0;
+    uint64_t bytesSent = 0;
+    uint64_t readErrors = 0;
+    uint64_t writeErrors = 0;
+    
+    void reset() noexcept {
+        bytesReceived = bytesSent = readErrors = writeErrors = 0;
+    }
+};
+
+// ============================================================================
+// é”™è¯¯å¤„ç†ç±»
+// ============================================================================
+
+/**
+ * @brief ä¸²å£é”™è¯¯ç±»
+ */
+class SerialError : public std::runtime_error {
+public:
+    explicit SerialError(ErrorCode code, const std::string& message = "")
+        : std::runtime_error(message.empty() ? errorCodeToString(code) : message)
+        , code_(code) {}
+    
+    ErrorCode code() const noexcept { return code_; }
+    
+    static std::string errorCodeToString(ErrorCode code) {
+        switch (code) {
+            case ErrorCode::Success: return "Success";
+            case ErrorCode::Unknown: return "Unknown error";
+            case ErrorCode::InvalidParameter: return "Invalid parameter";
+            case ErrorCode::NotOpen: return "Port not open";
+            case ErrorCode::AlreadyOpen: return "Port already open";
+            case ErrorCode::Timeout: return "Operation timeout";
+            case ErrorCode::OpenFailed: return "Failed to open port";
+            case ErrorCode::CloseFailed: return "Failed to close port";
+            case ErrorCode::PortNotFound: return "Port not found";
+            case ErrorCode::PermissionDenied: return "Permission denied";
+            case ErrorCode::PortBusy: return "Port is busy";
+            case ErrorCode::ConfigFailed: return "Configuration failed";
+            case ErrorCode::ReadFailed: return "Read failed";
+            case ErrorCode::WriteFailed: return "Write failed";
+            case ErrorCode::BufferOverflow: return "Buffer overflow";
+            default: return "Unknown error code";
+        }
+    }
+
+private:
+    ErrorCode code_;
+};
+
+// ============================================================================
+// ç»“æœç±»å‹
+// ============================================================================
+
+/**
+ * @brief æ“ä½œç»“æœç±»å‹
+ */
+template<typename T>
+class Result {
+public:
+    Result(const T& value) : value_(value), hasValue_(true) {}
+    Result(T&& value) : value_(std::move(value)), hasValue_(true) {}
+    Result(ErrorCode code, const std::string& msg = "") 
+        : error_(code), errorMsg_(msg), hasValue_(false) {}
+    
+    bool hasValue() const noexcept { return hasValue_; }
+    explicit operator bool() const noexcept { return hasValue_; }
+    
+    T& value() & { 
+        if (!hasValue_) throw SerialError(error_, errorMsg_);
+        return value_; 
+    }
+    const T& value() const& { 
+        if (!hasValue_) throw SerialError(error_, errorMsg_);
+        return value_; 
+    }
+    T&& value() && { 
+        if (!hasValue_) throw SerialError(error_, errorMsg_);
+        return std::move(value_); 
+    }
+    
+    T valueOr(T&& defaultValue) const& {
+        return hasValue_ ? value_ : std::forward<T>(defaultValue);
+    }
+    
+    ErrorCode error() const noexcept { return error_; }
+    const std::string& errorMessage() const noexcept { return errorMsg_; }
+    
+    T& operator*() & { return value(); }
+    const T& operator*() const& { return value(); }
+    T* operator->() { return &value(); }
+    const T* operator->() const { return &value(); }
+
+private:
+    T value_{};
+    ErrorCode error_ = ErrorCode::Success;
+    std::string errorMsg_;
+    bool hasValue_;
+};
+
+/**
+ * @brief æ— è¿”å›å€¼çš„æ“ä½œç»“æœç‰¹åŒ–
+ */
+template<>
+class Result<void> {
+public:
+    Result() : hasValue_(true) {}
+    Result(ErrorCode code, const std::string& msg = "") 
+        : error_(code), errorMsg_(msg), hasValue_(false) {}
+    
+    bool hasValue() const noexcept { return hasValue_; }
+    explicit operator bool() const noexcept { return hasValue_; }
+    ErrorCode error() const noexcept { return error_; }
+    const std::string& errorMessage() const noexcept { return errorMsg_; }
+
+private:
+    ErrorCode error_ = ErrorCode::Success;
+    std::string errorMsg_;
+    bool hasValue_;
+};
+
+using VoidResult = Result<void>;
+
+// ============================================================================
+// ä¸²å£ç±»
+// ============================================================================
+
+/**
+ * @brief ç°ä»£C++è·¨å¹³å°ä¸²å£ç±»
+ */
+class SerialPort {
+public:
+    SerialPort();
+    explicit SerialPort(const std::string& portName, const SerialConfig& config = SerialConfig::defaultConfig());
+    ~SerialPort();
+    
+    // ç¦æ­¢æ‹·è´
+    SerialPort(const SerialPort&) = delete;
+    SerialPort& operator=(const SerialPort&) = delete;
+    
+    // å…è®¸ç§»åŠ¨
+    SerialPort(SerialPort&& other) noexcept;
+    SerialPort& operator=(SerialPort&& other) noexcept;
+    
+    // é™æ€æ–¹æ³•
+    static std::vector<PortInfo> enumerate();
+    static bool exists(const std::string& portName);
+    static std::string version() noexcept { return VERSION_STRING; }
+    
+    // æ‰“å¼€/å…³é—­
+    VoidResult open(const std::string& portName, const SerialConfig& config = SerialConfig::defaultConfig());
+    VoidResult close();
+    bool isOpen() const noexcept;
+    
+    // é…ç½®
+    SerialConfig config() const noexcept;
+    VoidResult setConfig(const SerialConfig& config);
+    VoidResult setBaudRate(BaudRate baudRate);
+    VoidResult setDataBits(DataBits dataBits);
+    VoidResult setStopBits(StopBits stopBits);
+    VoidResult setParity(Parity parity);
+    VoidResult setFlowControl(FlowControl flowControl);
+    VoidResult setReadTimeout(Duration timeout);
+    VoidResult setWriteTimeout(Duration timeout);
+    
+    // åŒæ­¥è¯»å†™
+    Result<ByteBuffer> read(size_t maxBytes, std::optional<Duration> timeout = std::nullopt);
+    Result<ByteBuffer> readExact(size_t exactBytes, std::optional<Duration> timeout = std::nullopt);
+    Result<ByteBuffer> readUntil(Byte delimiter, size_t maxBytes = 4096, std::optional<Duration> timeout = std::nullopt);
+    Result<std::string> readLine(size_t maxBytes = 4096, std::optional<Duration> timeout = std::nullopt);
+    
+    Result<size_t> write(const Byte* data, size_t size, std::optional<Duration> timeout = std::nullopt);
+    Result<size_t> write(const ByteBuffer& data, std::optional<Duration> timeout = std::nullopt);
+    Result<size_t> write(const std::string& str, std::optional<Duration> timeout = std::nullopt);
+    Result<size_t> writeLine(const std::string& line, std::optional<Duration> timeout = std::nullopt);
+    
+    // å¼‚æ­¥è¯»å†™
+    std::future<Result<ByteBuffer>> readAsync(size_t maxBytes);
+    std::future<Result<size_t>> writeAsync(ByteBuffer data);
+    std::future<Result<size_t>> writeAsync(std::string str);
+    
+    // å›è°ƒæ¨¡å¼
+    void setDataCallback(DataCallback callback);
+    void setEventCallback(EventCallback callback);
+    void setErrorCallback(ErrorCallback callback);
+    VoidResult startAsyncReceive();
+    void stopAsyncReceive();
+    bool isAsyncReceiving() const noexcept;
+    
+    // ç¼“å†²åŒºæ“ä½œ
+    Result<size_t> available() const;
+    VoidResult flushInput();
+    VoidResult flushOutput();
+    VoidResult flush();
+    
+    // æ§åˆ¶çº¿
+    VoidResult setDTR(bool state);
+    VoidResult setRTS(bool state);
+    
+    // çŠ¶æ€
+    std::string portName() const noexcept;
+    PortStatistics statistics() const noexcept;
+    void resetStatistics() noexcept;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace csp
+
+#endif // CSERIALPORT_H
