@@ -193,15 +193,15 @@ public:
                     return Result<ByteBuffer>(ErrorCode::Timeout, "Read timeout");
                 } else if (waitResult == WAIT_OBJECT_0) {
                     if (!GetOverlappedResult(handle_, &ov, &dwBytesRead, FALSE)) {
-                        statistics_.readErrors++;
+                        statistics_.readErrors.fetch_add(1, std::memory_order_relaxed);
                         return Result<ByteBuffer>(ErrorCode::ReadFailed, "Read failed");
                     }
                 } else {
-                    statistics_.readErrors++;
+                    statistics_.readErrors.fetch_add(1, std::memory_order_relaxed);
                     return Result<ByteBuffer>(ErrorCode::ReadFailed, "Wait failed");
                 }
             } else {
-                statistics_.readErrors++;
+                statistics_.readErrors.fetch_add(1, std::memory_order_relaxed);
                 return Result<ByteBuffer>(ErrorCode::ReadFailed, "Read failed");
             }
         }
@@ -220,7 +220,7 @@ public:
         int selectResult = select(fd_ + 1, &readfds, nullptr, nullptr, &tv);
         
         if (selectResult < 0) {
-            statistics_.readErrors++;
+            statistics_.readErrors.fetch_add(1, std::memory_order_relaxed);
             return Result<ByteBuffer>(ErrorCode::ReadFailed, "Select failed");
         } else if (selectResult == 0) {
             return Result<ByteBuffer>(ErrorCode::Timeout, "Read timeout");
@@ -228,7 +228,7 @@ public:
         
         ssize_t result = ::read(fd_, buffer.data(), maxBytes);
         if (result < 0) {
-            statistics_.readErrors++;
+            statistics_.readErrors.fetch_add(1, std::memory_order_relaxed);
             return Result<ByteBuffer>(ErrorCode::ReadFailed, "Read failed");
         }
         
@@ -236,7 +236,7 @@ public:
 #endif
         
         buffer.resize(bytesRead);
-        statistics_.bytesReceived += bytesRead;
+        statistics_.bytesReceived.fetch_add(bytesRead, std::memory_order_relaxed);
         
         return Result<ByteBuffer>(std::move(buffer));
     }
@@ -280,38 +280,66 @@ public:
     
     Result<ByteBuffer> readUntilInternal(Byte delimiter, size_t maxBytes, std::optional<Duration> timeout) {
         ByteBuffer result;
-        result.reserve(256);
-        
+        result.reserve(std::min(maxBytes, static_cast<size_t>(256)));
+
+        // 内部缓冲区用于批量读取
+        ByteBuffer readBuffer(128);
+        size_t bufferPos = 0;
+        size_t bufferLen = 0;
+
         auto startTime = std::chrono::steady_clock::now();
         Duration actualTimeout = timeout.value_or(config_.readTimeout);
-        
+
         while (result.size() < maxBytes) {
             auto elapsed = std::chrono::duration_cast<Duration>(
                 std::chrono::steady_clock::now() - startTime);
-            
+
             if (elapsed >= actualTimeout) {
+                // 如果已经读取了一些数据，返回它们而不是报错
+                if (!result.empty()) {
+                    break;
+                }
                 return Result<ByteBuffer>(ErrorCode::Timeout, "Read until timeout");
             }
-            
+
+            // 如果缓冲区中还有数据，先处理缓冲区
+            if (bufferPos < bufferLen) {
+                while (bufferPos < bufferLen && result.size() < maxBytes) {
+                    Byte b = readBuffer[bufferPos++];
+                    result.push_back(b);
+                    if (b == delimiter) {
+                        return Result<ByteBuffer>(std::move(result));
+                    }
+                }
+                continue;
+            }
+
+            // 缓冲区为空，读取更多数据
             Duration remainingTimeout = actualTimeout - elapsed;
-            
-            auto readResult = readInternal(1, remainingTimeout);
+            size_t bytesToRead = std::min(readBuffer.size(), maxBytes - result.size());
+
+            auto readResult = readInternal(bytesToRead, remainingTimeout);
             if (!readResult) {
                 if (readResult.error() == ErrorCode::Timeout && !result.empty()) {
                     break;
                 }
                 return readResult;
             }
-            
+
             auto& data = readResult.value();
-            if (!data.empty()) {
-                result.push_back(data[0]);
-                if (data[0] == delimiter) {
-                    break;
+            if (data.empty()) {
+                continue;
+            }
+
+            // 在读取的数据中查找分隔符
+            for (size_t i = 0; i < data.size() && result.size() < maxBytes; ++i) {
+                result.push_back(data[i]);
+                if (data[i] == delimiter) {
+                    return Result<ByteBuffer>(std::move(result));
                 }
             }
         }
-        
+
         return Result<ByteBuffer>(std::move(result));
     }
     
@@ -374,20 +402,20 @@ public:
                     return Result<size_t>(ErrorCode::Timeout, "Write timeout");
                 } else if (waitResult == WAIT_OBJECT_0) {
                     if (!GetOverlappedResult(handle_, &ov, &dwBytesWritten, FALSE)) {
-                        statistics_.writeErrors++;
+                        statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
                         return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
                     }
                 } else {
-                    statistics_.writeErrors++;
+                    statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
                     return Result<size_t>(ErrorCode::WriteFailed, "Wait failed");
                 }
             } else {
-                statistics_.writeErrors++;
+                statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
                 return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
             }
         }
         
-        statistics_.bytesSent += dwBytesWritten;
+        statistics_.bytesSent.fetch_add(dwBytesWritten, std::memory_order_relaxed);
         return Result<size_t>(static_cast<size_t>(dwBytesWritten));
         
 #elif CSERIALPORT_PLATFORM_LINUX
@@ -402,7 +430,7 @@ public:
         int selectResult = select(fd_ + 1, nullptr, &writefds, nullptr, &tv);
         
         if (selectResult < 0) {
-            statistics_.writeErrors++;
+            statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
             return Result<size_t>(ErrorCode::WriteFailed, "Select failed");
         } else if (selectResult == 0) {
             return Result<size_t>(ErrorCode::Timeout, "Write timeout");
@@ -410,11 +438,11 @@ public:
         
         ssize_t result = ::write(fd_, data, size);
         if (result < 0) {
-            statistics_.writeErrors++;
+            statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
             return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
         }
         
-        statistics_.bytesSent += result;
+        statistics_.bytesSent.fetch_add(result, std::memory_order_relaxed);
         return Result<size_t>(static_cast<size_t>(result));
 #endif
     }
@@ -625,6 +653,119 @@ public:
 #endif
         return VoidResult();
     }
+
+    Result<bool> getCTS() const {
+        if (!isOpen_) {
+            return Result<bool>(ErrorCode::NotOpen, "Port is not open");
+        }
+
+#if CSERIALPORT_PLATFORM_WINDOWS
+        DWORD status;
+        if (!GetCommModemStatus(handle_, &status)) {
+            return Result<bool>(ErrorCode::ReadFailed, "Failed to get modem status");
+        }
+        return Result<bool>((status & MS_CTS_ON) != 0);
+#elif CSERIALPORT_PLATFORM_LINUX
+        int status;
+        if (ioctl(fd_, TIOCMGET, &status) < 0) {
+            return Result<bool>(ErrorCode::ReadFailed, "Failed to get modem status");
+        }
+        return Result<bool>((status & TIOCM_CTS) != 0);
+#endif
+    }
+
+    Result<bool> getDSR() const {
+        if (!isOpen_) {
+            return Result<bool>(ErrorCode::NotOpen, "Port is not open");
+        }
+
+#if CSERIALPORT_PLATFORM_WINDOWS
+        DWORD status;
+        if (!GetCommModemStatus(handle_, &status)) {
+            return Result<bool>(ErrorCode::ReadFailed, "Failed to get modem status");
+        }
+        return Result<bool>((status & MS_DSR_ON) != 0);
+#elif CSERIALPORT_PLATFORM_LINUX
+        int status;
+        if (ioctl(fd_, TIOCMGET, &status) < 0) {
+            return Result<bool>(ErrorCode::ReadFailed, "Failed to get modem status");
+        }
+        return Result<bool>((status & TIOCM_DSR) != 0);
+#endif
+    }
+
+    Result<bool> getCD() const {
+        if (!isOpen_) {
+            return Result<bool>(ErrorCode::NotOpen, "Port is not open");
+        }
+
+#if CSERIALPORT_PLATFORM_WINDOWS
+        DWORD status;
+        if (!GetCommModemStatus(handle_, &status)) {
+            return Result<bool>(ErrorCode::ReadFailed, "Failed to get modem status");
+        }
+        return Result<bool>((status & MS_RLSD_ON) != 0);
+#elif CSERIALPORT_PLATFORM_LINUX
+        int status;
+        if (ioctl(fd_, TIOCMGET, &status) < 0) {
+            return Result<bool>(ErrorCode::ReadFailed, "Failed to get modem status");
+        }
+        return Result<bool>((status & TIOCM_CD) != 0);
+#endif
+    }
+
+    Result<bool> getRI() const {
+        if (!isOpen_) {
+            return Result<bool>(ErrorCode::NotOpen, "Port is not open");
+        }
+
+#if CSERIALPORT_PLATFORM_WINDOWS
+        DWORD status;
+        if (!GetCommModemStatus(handle_, &status)) {
+            return Result<bool>(ErrorCode::ReadFailed, "Failed to get modem status");
+        }
+        return Result<bool>((status & MS_RING_ON) != 0);
+#elif CSERIALPORT_PLATFORM_LINUX
+        int status;
+        if (ioctl(fd_, TIOCMGET, &status) < 0) {
+            return Result<bool>(ErrorCode::ReadFailed, "Failed to get modem status");
+        }
+        return Result<bool>((status & TIOCM_RI) != 0);
+#endif
+    }
+
+    VoidResult sendBreak(Duration duration) {
+        if (!isOpen_) {
+            return VoidResult(ErrorCode::NotOpen, "Port is not open");
+        }
+
+#if CSERIALPORT_PLATFORM_WINDOWS
+        if (!SetCommBreak(handle_)) {
+            return VoidResult(ErrorCode::WriteFailed, "Failed to set break");
+        }
+        std::this_thread::sleep_for(duration);
+        if (!ClearCommBreak(handle_)) {
+            return VoidResult(ErrorCode::WriteFailed, "Failed to clear break");
+        }
+#elif CSERIALPORT_PLATFORM_LINUX
+        // Linux tcsendbreak: duration 0 sends break for 0.25-0.5 seconds
+        // For custom duration, we use TIOCSBRK/TIOCCBRK
+        if (duration.count() <= 0) {
+            if (tcsendbreak(fd_, 0) < 0) {
+                return VoidResult(ErrorCode::WriteFailed, "Failed to send break");
+            }
+        } else {
+            if (ioctl(fd_, TIOCSBRK, 0) < 0) {
+                return VoidResult(ErrorCode::WriteFailed, "Failed to set break");
+            }
+            std::this_thread::sleep_for(duration);
+            if (ioctl(fd_, TIOCCBRK, 0) < 0) {
+                return VoidResult(ErrorCode::WriteFailed, "Failed to clear break");
+            }
+        }
+#endif
+        return VoidResult();
+    }
     
     // ========================================================================
     // 状态
@@ -648,78 +789,122 @@ public:
     
     static std::vector<PortInfo> enumerate() {
         std::vector<PortInfo> ports;
-        
+
 #if CSERIALPORT_PLATFORM_WINDOWS
-        for (int i = 1; i <= 256; ++i) {
-            std::string portName = "COM" + std::to_string(i);
-            std::string devicePath = "\\\\.\\" + portName;
-            
-            HANDLE handle = CreateFileA(
-                devicePath.c_str(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                nullptr,
-                OPEN_EXISTING,
-                0,
-                nullptr
-            );
-            
-            if (handle != INVALID_HANDLE_VALUE) {
-                CloseHandle(handle);
-                PortInfo info;
-                info.portName = portName;
-                info.isAvailable = true;
-                ports.push_back(info);
-            } else if (GetLastError() == ERROR_ACCESS_DENIED) {
-                PortInfo info;
-                info.portName = portName;
-                info.isAvailable = false;
-                ports.push_back(info);
-            }
-        }
-        
-        HKEY hKey;
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, 
-                          "HARDWARE\\DEVICEMAP\\SERIALCOMM", 
-                          0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            
-            char valueName[256];
-            char valueData[256];
-            DWORD valueNameSize, valueDataSize, valueType;
-            DWORD index = 0;
-            
-            while (true) {
-                valueNameSize = sizeof(valueName);
-                valueDataSize = sizeof(valueData);
-                
-                LONG result = RegEnumValueA(hKey, index++, valueName, &valueNameSize,
-                                            nullptr, &valueType, 
-                                            reinterpret_cast<LPBYTE>(valueData), 
-                                            &valueDataSize);
-                
-                if (result != ERROR_SUCCESS) break;
-                
-                if (valueType == REG_SZ) {
-                    std::string portName(valueData);
-                    
-                    auto it = std::find_if(ports.begin(), ports.end(),
-                        [&portName](const PortInfo& p) { return p.portName == portName; });
-                    
-                    if (it == ports.end()) {
-                        PortInfo info;
-                        info.portName = portName;
-                        info.description = valueName;
-                        info.isAvailable = true;
-                        ports.push_back(info);
-                    } else {
-                        it->description = valueName;
+        // 使用 SetupAPI 枚举串口（更高效）
+        GUID guid = {0x86E0D1E0L, 0x8089, 0x11D0, {0x9C, 0xE4, 0x08, 0x00, 0x3E, 0x30, 0x1F, 0x73}};
+
+        HDEVINFO hDevInfo = SetupDiGetClassDevs(&guid, nullptr, nullptr, DIGCF_PRESENT);
+
+        if (hDevInfo != INVALID_HANDLE_VALUE) {
+            SP_DEVINFO_DATA devInfoData;
+            devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+            for (DWORD i = 0; SetupDiEnumDeviceInfo(hDevInfo, i, &devInfoData); ++i) {
+                // 获取端口名称
+                HKEY hKey = SetupDiOpenDevRegKey(hDevInfo, &devInfoData, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
+                if (hKey != INVALID_HANDLE_VALUE) {
+                    char portName[256] = {0};
+                    DWORD portNameSize = sizeof(portName);
+                    DWORD type = 0;
+
+                    if (RegQueryValueExA(hKey, "PortName", nullptr, &type,
+                                         reinterpret_cast<LPBYTE>(portName), &portNameSize) == ERROR_SUCCESS) {
+                        // 只处理 COM 端口
+                        if (strncmp(portName, "COM", 3) == 0) {
+                            PortInfo info;
+                            info.portName = portName;
+
+                            // 获取设备描述
+                            char description[256] = {0};
+                            DWORD descSize = sizeof(description);
+                            if (SetupDiGetDeviceRegistryPropertyA(hDevInfo, &devInfoData, SPDRP_FRIENDLYNAME,
+                                                                   nullptr, reinterpret_cast<PBYTE>(description),
+                                                                   descSize, nullptr)) {
+                                info.description = description;
+                            } else if (SetupDiGetDeviceRegistryPropertyA(hDevInfo, &devInfoData, SPDRP_DEVICEDESC,
+                                                                          nullptr, reinterpret_cast<PBYTE>(description),
+                                                                          descSize, nullptr)) {
+                                info.description = description;
+                            }
+
+                            // 获取硬件 ID
+                            char hardwareId[256] = {0};
+                            DWORD hwIdSize = sizeof(hardwareId);
+                            if (SetupDiGetDeviceRegistryPropertyA(hDevInfo, &devInfoData, SPDRP_HARDWAREID,
+                                                                   nullptr, reinterpret_cast<PBYTE>(hardwareId),
+                                                                   hwIdSize, nullptr)) {
+                                info.hardwareId = hardwareId;
+                            }
+
+                            // 检查端口是否可用
+                            std::string devicePath = "\\\\.\\" + info.portName;
+                            HANDLE handle = CreateFileA(devicePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                                        0, nullptr, OPEN_EXISTING, 0, nullptr);
+                            if (handle != INVALID_HANDLE_VALUE) {
+                                CloseHandle(handle);
+                                info.isAvailable = true;
+                            } else {
+                                info.isAvailable = (GetLastError() != ERROR_FILE_NOT_FOUND);
+                            }
+
+                            ports.push_back(info);
+                        }
                     }
+                    RegCloseKey(hKey);
                 }
             }
-            
-            RegCloseKey(hKey);
+
+            SetupDiDestroyDeviceInfoList(hDevInfo);
         }
-        
+
+        // 如果 SetupAPI 没有找到任何端口，回退到注册表方法
+        if (ports.empty()) {
+            HKEY hKey;
+            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                              "HARDWARE\\DEVICEMAP\\SERIALCOMM",
+                              0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+
+                char valueName[256];
+                char valueData[256];
+                DWORD valueNameSize, valueDataSize, valueType;
+                DWORD index = 0;
+
+                while (true) {
+                    valueNameSize = sizeof(valueName);
+                    valueDataSize = sizeof(valueData);
+
+                    LONG result = RegEnumValueA(hKey, index++, valueName, &valueNameSize,
+                                                nullptr, &valueType,
+                                                reinterpret_cast<LPBYTE>(valueData),
+                                                &valueDataSize);
+
+                    if (result != ERROR_SUCCESS) break;
+
+                    if (valueType == REG_SZ) {
+                        PortInfo info;
+                        info.portName = valueData;
+                        info.description = valueName;
+
+                        // 检查端口是否可用
+                        std::string devicePath = "\\\\.\\" + info.portName;
+                        HANDLE handle = CreateFileA(devicePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                                    0, nullptr, OPEN_EXISTING, 0, nullptr);
+                        if (handle != INVALID_HANDLE_VALUE) {
+                            CloseHandle(handle);
+                            info.isAvailable = true;
+                        } else {
+                            info.isAvailable = (GetLastError() != ERROR_FILE_NOT_FOUND);
+                        }
+
+                        ports.push_back(info);
+                    }
+                }
+
+                RegCloseKey(hKey);
+            }
+        }
+
 #elif CSERIALPORT_PLATFORM_LINUX
         const char* patterns[] = {
             "/dev/ttyS*",
@@ -892,16 +1077,27 @@ private:
         }
         
 #elif CSERIALPORT_PLATFORM_LINUX
+        // Linux 平台参数验证
+        if (config.stopBits == StopBits::OneHalf) {
+            return VoidResult(ErrorCode::InvalidParameter,
+                "1.5 stop bits is not supported on Linux");
+        }
+
+        if (config.parity == Parity::Mark || config.parity == Parity::Space) {
+            return VoidResult(ErrorCode::InvalidParameter,
+                "Mark and Space parity are not supported on Linux");
+        }
+
         struct termios tty = {};
-        
+
         if (tcgetattr(fd_, &tty) != 0) {
             return VoidResult(ErrorCode::ConfigFailed, "Failed to get terminal attributes");
         }
-        
+
         // 设置波特率
         speed_t speed = B9600;
         uint32_t baudValue = config.getBaudRateValue();
-        
+
         switch (baudValue) {
             case 110:    speed = B110; break;
             case 300:    speed = B300; break;
@@ -917,12 +1113,14 @@ private:
             case 230400: speed = B230400; break;
             case 460800: speed = B460800; break;
             case 921600: speed = B921600; break;
-            default:     speed = B9600; break;
+            default:
+                return VoidResult(ErrorCode::InvalidParameter,
+                    "Unsupported baud rate: " + std::to_string(baudValue));
         }
-        
+
         cfsetispeed(&tty, speed);
         cfsetospeed(&tty, speed);
-        
+
         // 设置数据位
         tty.c_cflag &= ~CSIZE;
         switch (config.dataBits) {
@@ -931,15 +1129,15 @@ private:
             case DataBits::Seven: tty.c_cflag |= CS7; break;
             case DataBits::Eight: tty.c_cflag |= CS8; break;
         }
-        
-        // 设置停止位
+
+        // 设置停止位（已验证不是 1.5 停止位）
         if (config.stopBits == StopBits::Two) {
             tty.c_cflag |= CSTOPB;
         } else {
             tty.c_cflag &= ~CSTOPB;
         }
-        
-        // 设置校验位
+
+        // 设置校验位（已验证不是 Mark/Space）
         switch (config.parity) {
             case Parity::None:
                 tty.c_cflag &= ~PARENB;
@@ -1060,7 +1258,7 @@ private:
             }
 
             if (bytesRead > 0) {
-                statistics_.bytesReceived += bytesRead;
+                statistics_.bytesReceived.fetch_add(bytesRead, std::memory_order_relaxed);
 
                 DataCallback dataCb;
                 EventCallback eventCb;
@@ -1097,7 +1295,7 @@ private:
                 ssize_t bytesRead = ::read(fd_, buffer.data(), buffer.size());
 
                 if (bytesRead > 0) {
-                    statistics_.bytesReceived += bytesRead;
+                    statistics_.bytesReceived.fetch_add(bytesRead, std::memory_order_relaxed);
 
                     DataCallback dataCb;
                     EventCallback eventCb;
@@ -1188,12 +1386,6 @@ private:
 // ============================================================================
 
 SerialPort::SerialPort() : impl_(std::make_unique<Impl>()) {}
-
-SerialPort::SerialPort(const std::string& portName, const SerialConfig& config)
-    : impl_(std::make_unique<Impl>()) {
-    // 注意：构造函数不会抛出异常，用户需要在构造后检查 isOpen() 或使用默认构造 + open()
-    impl_->open(portName, config);
-}
 
 SerialPort::~SerialPort() = default;
 
@@ -1360,6 +1552,26 @@ VoidResult SerialPort::setDTR(bool state) {
 
 VoidResult SerialPort::setRTS(bool state) {
     return impl_->setRTS(state);
+}
+
+Result<bool> SerialPort::getCTS() const {
+    return impl_->getCTS();
+}
+
+Result<bool> SerialPort::getDSR() const {
+    return impl_->getDSR();
+}
+
+Result<bool> SerialPort::getCD() const {
+    return impl_->getCD();
+}
+
+Result<bool> SerialPort::getRI() const {
+    return impl_->getRI();
+}
+
+VoidResult SerialPort::sendBreak(Duration duration) {
+    return impl_->sendBreak(duration);
 }
 
 std::string SerialPort::portName() const noexcept {

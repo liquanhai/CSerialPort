@@ -180,6 +180,31 @@ if(CSERIALPORT_BUILD_EXAMPLES)
 endif()
 
 # ============================================================================
+# 测试
+# ============================================================================
+if(CSERIALPORT_BUILD_TESTS)
+    enable_testing()
+
+    # 单元测试
+    add_executable(test_serialport tests/test_serialport.cpp)
+    target_link_libraries(test_serialport PRIVATE CSerialPort::CSerialPort)
+    set_target_properties(test_serialport PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/tests
+    )
+
+    # 添加测试
+    add_test(NAME SerialPortTests COMMAND test_serialport)
+
+    # 自定义测试目标
+    add_custom_target(run_tests
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+        DEPENDS test_serialport
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running unit tests..."
+    )
+endif()
+
+# ============================================================================
 # 安装
 # ============================================================================
 include(GNUInstallDirs)
@@ -249,4 +274,7 @@ message(STATUS "  Build shared:   ${CSERIALPORT_BUILD_SHARED}")
 message(STATUS "  Build static:   ${CSERIALPORT_BUILD_STATIC}")
 message(STATUS "  Build examples: ${CSERIALPORT_BUILD_EXAMPLES}")
 message(STATUS "  Build tests:    ${CSERIALPORT_BUILD_TESTS}")
+if(CSERIALPORT_BUILD_TESTS)
+    message(STATUS "    Run tests:    cmake --build . --target run_tests")
+endif()
 message(STATUS "")

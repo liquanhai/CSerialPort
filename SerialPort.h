@@ -46,10 +46,8 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
-#include <condition_variable>
 #include <atomic>
 #include <future>
-#include <queue>
 #include <cstdint>
 #include <stdexcept>
 
@@ -251,17 +249,46 @@ struct PortInfo {
 };
 
 /**
- * @brief 串口统计信息
+ * @brief 串口统计信息（线程安全）
  */
 struct PortStatistics {
-    uint64_t bytesReceived = 0;
-    uint64_t bytesSent = 0;
-    uint64_t readErrors = 0;
-    uint64_t writeErrors = 0;
-    
-    void reset() noexcept {
-        bytesReceived = bytesSent = readErrors = writeErrors = 0;
+    std::atomic<uint64_t> bytesReceived{0};
+    std::atomic<uint64_t> bytesSent{0};
+    std::atomic<uint64_t> readErrors{0};
+    std::atomic<uint64_t> writeErrors{0};
+
+    PortStatistics() = default;
+
+    // 拷贝构造函数（用于返回统计信息副本）
+    PortStatistics(const PortStatistics& other) noexcept
+        : bytesReceived(other.bytesReceived.load(std::memory_order_relaxed))
+        , bytesSent(other.bytesSent.load(std::memory_order_relaxed))
+        , readErrors(other.readErrors.load(std::memory_order_relaxed))
+        , writeErrors(other.writeErrors.load(std::memory_order_relaxed)) {}
+
+    // 拷贝赋值运算符
+    PortStatistics& operator=(const PortStatistics& other) noexcept {
+        if (this != &other) {
+            bytesReceived.store(other.bytesReceived.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            bytesSent.store(other.bytesSent.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            readErrors.store(other.readErrors.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            writeErrors.store(other.writeErrors.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+        return *this;
     }
+
+    void reset() noexcept {
+        bytesReceived.store(0, std::memory_order_relaxed);
+        bytesSent.store(0, std::memory_order_relaxed);
+        readErrors.store(0, std::memory_order_relaxed);
+        writeErrors.store(0, std::memory_order_relaxed);
+    }
+
+    // 便捷的获取方法
+    uint64_t getBytesReceived() const noexcept { return bytesReceived.load(std::memory_order_relaxed); }
+    uint64_t getBytesSent() const noexcept { return bytesSent.load(std::memory_order_relaxed); }
+    uint64_t getReadErrors() const noexcept { return readErrors.load(std::memory_order_relaxed); }
+    uint64_t getWriteErrors() const noexcept { return writeErrors.load(std::memory_order_relaxed); }
 };
 
 // ============================================================================
@@ -442,11 +469,20 @@ using VoidResult = Result<void>;
 
 /**
  * @brief 现代C++跨平台串口类
+ *
+ * @note 使用 open() 方法打开串口，不要使用带参数的构造函数直接打开，
+ *       因为构造函数无法返回错误信息。
  */
 class SerialPort {
 public:
+    /**
+     * @brief 默认构造函数
+     */
     SerialPort();
-    explicit SerialPort(const std::string& portName, const SerialConfig& config = SerialConfig::defaultConfig());
+
+    /**
+     * @brief 析构函数，自动关闭串口
+     */
     ~SerialPort();
     
     // 禁止拷贝
@@ -511,6 +547,13 @@ public:
     // 控制线
     VoidResult setDTR(bool state);
     VoidResult setRTS(bool state);
+    Result<bool> getCTS() const;
+    Result<bool> getDSR() const;
+    Result<bool> getCD() const;
+    Result<bool> getRI() const;
+
+    // Break 信号
+    VoidResult sendBreak(Duration duration = Duration(250));
     
     // 状态
     std::string portName() const noexcept;
