@@ -47,6 +47,7 @@ elseif(APPLE)
     set(CSERIALPORT_PLATFORM "macOS")
     add_definitions(-DCSERIALPORT_PLATFORM_WINDOWS=0)
     add_definitions(-DCSERIALPORT_PLATFORM_LINUX=1)
+    message(WARNING "macOS is treated as Linux-like platform for serial port access")
 else()
     message(FATAL_ERROR "Unsupported platform")
 endif()
@@ -193,6 +194,7 @@ if(CSERIALPORT_BUILD_STATIC)
     install(TARGETS cserialport_static
         EXPORT CSerialPortTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
 endif()
 
@@ -201,6 +203,7 @@ if(CSERIALPORT_BUILD_SHARED)
         EXPORT CSerialPortTargets
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
 endif()
 

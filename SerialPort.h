@@ -19,8 +19,8 @@
  * @copyright MIT License
  */
 
-#ifndef CSERIALPORT_H
-#define CSERIALPORT_H
+#ifndef CSERIAL_PORT_H
+#define CSERIAL_PORT_H
 
 // ============================================================================
 // 平台检测
@@ -316,32 +316,63 @@ class Result {
 public:
     Result(const T& value) : value_(value), hasValue_(true) {}
     Result(T&& value) : value_(std::move(value)), hasValue_(true) {}
-    Result(ErrorCode code, const std::string& msg = "") 
+    Result(ErrorCode code, const std::string& msg = "")
         : error_(code), errorMsg_(msg), hasValue_(false) {}
-    
+
+    // 拷贝构造函数
+    Result(const Result& other)
+        : value_(other.value_), error_(other.error_), errorMsg_(other.errorMsg_), hasValue_(other.hasValue_) {}
+
+    // 移动构造函数
+    Result(Result&& other) noexcept
+        : value_(std::move(other.value_)), error_(other.error_), errorMsg_(std::move(other.errorMsg_)), hasValue_(other.hasValue_) {}
+
+    // 拷贝赋值运算符
+    Result& operator=(const Result& other) {
+        if (this != &other) {
+            value_ = other.value_;
+            error_ = other.error_;
+            errorMsg_ = other.errorMsg_;
+            hasValue_ = other.hasValue_;
+        }
+        return *this;
+    }
+
+    // 移动赋值运算符
+    Result& operator=(Result&& other) noexcept {
+        if (this != &other) {
+            value_ = std::move(other.value_);
+            error_ = other.error_;
+            errorMsg_ = std::move(other.errorMsg_);
+            hasValue_ = other.hasValue_;
+        }
+        return *this;
+    }
+
     bool hasValue() const noexcept { return hasValue_; }
     explicit operator bool() const noexcept { return hasValue_; }
-    
-    T& value() & { 
+
+    T& value() & {
         if (!hasValue_) throw SerialError(error_, errorMsg_);
-        return value_; 
+        return value_;
     }
-    const T& value() const& { 
+    const T& value() const& {
         if (!hasValue_) throw SerialError(error_, errorMsg_);
-        return value_; 
+        return value_;
     }
-    T&& value() && { 
+    T&& value() && {
         if (!hasValue_) throw SerialError(error_, errorMsg_);
-        return std::move(value_); 
+        return std::move(value_);
     }
-    
-    T valueOr(T&& defaultValue) const& {
-        return hasValue_ ? value_ : std::forward<T>(defaultValue);
+
+    template<typename U>
+    T valueOr(U&& defaultValue) const& {
+        return hasValue_ ? value_ : static_cast<T>(std::forward<U>(defaultValue));
     }
-    
+
     ErrorCode error() const noexcept { return error_; }
     const std::string& errorMessage() const noexcept { return errorMsg_; }
-    
+
     T& operator*() & { return value(); }
     const T& operator*() const& { return value(); }
     T* operator->() { return &value(); }
@@ -361,9 +392,37 @@ template<>
 class Result<void> {
 public:
     Result() : hasValue_(true) {}
-    Result(ErrorCode code, const std::string& msg = "") 
+    Result(ErrorCode code, const std::string& msg = "")
         : error_(code), errorMsg_(msg), hasValue_(false) {}
-    
+
+    // 拷贝构造函数
+    Result(const Result& other)
+        : error_(other.error_), errorMsg_(other.errorMsg_), hasValue_(other.hasValue_) {}
+
+    // 移动构造函数
+    Result(Result&& other) noexcept
+        : error_(other.error_), errorMsg_(std::move(other.errorMsg_)), hasValue_(other.hasValue_) {}
+
+    // 拷贝赋值运算符
+    Result& operator=(const Result& other) {
+        if (this != &other) {
+            error_ = other.error_;
+            errorMsg_ = other.errorMsg_;
+            hasValue_ = other.hasValue_;
+        }
+        return *this;
+    }
+
+    // 移动赋值运算符
+    Result& operator=(Result&& other) noexcept {
+        if (this != &other) {
+            error_ = other.error_;
+            errorMsg_ = std::move(other.errorMsg_);
+            hasValue_ = other.hasValue_;
+        }
+        return *this;
+    }
+
     bool hasValue() const noexcept { return hasValue_; }
     explicit operator bool() const noexcept { return hasValue_; }
     ErrorCode error() const noexcept { return error_; }
@@ -465,4 +524,4 @@ private:
 
 } // namespace csp
 
-#endif // CSERIALPORT_H
+#endif // CSERIAL_PORT_H

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstring>
 #include <sstream>
+#include <thread>
 
 #if CSERIALPORT_PLATFORM_WINDOWS
     #include <setupapi.h>
@@ -75,15 +76,24 @@ public:
         }
         
         readEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-        writeEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-        shutdownEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-        
-        if (!readEvent_ || !writeEvent_ || !shutdownEvent_) {
+        if (!readEvent_) {
             closeInternal();
-            return VoidResult(ErrorCode::OpenFailed, "Failed to create events");
+            return VoidResult(ErrorCode::OpenFailed, "Failed to create read event");
         }
-        
-        if (!SetupComm(handle_, static_cast<DWORD>(config.readBufferSize), 
+
+        writeEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        if (!writeEvent_) {
+            closeInternal();
+            return VoidResult(ErrorCode::OpenFailed, "Failed to create write event");
+        }
+
+        shutdownEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        if (!shutdownEvent_) {
+            closeInternal();
+            return VoidResult(ErrorCode::OpenFailed, "Failed to create shutdown event");
+        }
+
+        if (!SetupComm(handle_, static_cast<DWORD>(config.readBufferSize),
                        static_cast<DWORD>(config.writeBufferSize))) {
             closeInternal();
             return VoidResult(ErrorCode::ConfigFailed, "Failed to setup comm buffers");
@@ -155,9 +165,7 @@ public:
     // 同步读取
     // ========================================================================
     
-    Result<ByteBuffer> read(size_t maxBytes, std::optional<Duration> timeout) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
+    Result<ByteBuffer> readInternal(size_t maxBytes, std::optional<Duration> timeout) {
         if (!isOpen_) {
             return Result<ByteBuffer>(ErrorCode::NotOpen, "Port is not open");
         }
@@ -233,7 +241,14 @@ public:
         return Result<ByteBuffer>(std::move(buffer));
     }
     
+    Result<ByteBuffer> read(size_t maxBytes, std::optional<Duration> timeout) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return readInternal(maxBytes, timeout);
+    }
+    
     Result<ByteBuffer> readExact(size_t exactBytes, std::optional<Duration> timeout) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
         ByteBuffer result;
         result.reserve(exactBytes);
         
@@ -251,7 +266,7 @@ public:
             Duration remainingTimeout = actualTimeout - elapsed;
             size_t remaining = exactBytes - result.size();
             
-            auto readResult = read(remaining, remainingTimeout);
+            auto readResult = readInternal(remaining, remainingTimeout);
             if (!readResult) {
                 return readResult;
             }
@@ -263,7 +278,7 @@ public:
         return Result<ByteBuffer>(std::move(result));
     }
     
-    Result<ByteBuffer> readUntil(Byte delimiter, size_t maxBytes, std::optional<Duration> timeout) {
+    Result<ByteBuffer> readUntilInternal(Byte delimiter, size_t maxBytes, std::optional<Duration> timeout) {
         ByteBuffer result;
         result.reserve(256);
         
@@ -280,7 +295,7 @@ public:
             
             Duration remainingTimeout = actualTimeout - elapsed;
             
-            auto readResult = read(1, remainingTimeout);
+            auto readResult = readInternal(1, remainingTimeout);
             if (!readResult) {
                 if (readResult.error() == ErrorCode::Timeout && !result.empty()) {
                     break;
@@ -300,8 +315,15 @@ public:
         return Result<ByteBuffer>(std::move(result));
     }
     
+    Result<ByteBuffer> readUntil(Byte delimiter, size_t maxBytes, std::optional<Duration> timeout) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return readUntilInternal(delimiter, maxBytes, timeout);
+    }
+    
     Result<std::string> readLine(size_t maxBytes, std::optional<Duration> timeout) {
-        auto result = readUntil('\n', maxBytes, timeout);
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        auto result = readUntilInternal('\n', maxBytes, timeout);
         if (!result) {
             return Result<std::string>(result.error(), result.errorMessage());
         }
@@ -971,80 +993,164 @@ private:
     
     void receiveThreadFunc() {
         ByteBuffer buffer(1024);
-        
+
         while (asyncReceiving_) {
 #if CSERIALPORT_PLATFORM_WINDOWS
             HANDLE events[2] = { shutdownEvent_, readEvent_ };
-            
+
             OVERLAPPED ov = {};
             ov.hEvent = readEvent_;
             ResetEvent(readEvent_);
-            
+
             DWORD bytesRead = 0;
             BOOL result = ReadFile(handle_, buffer.data(), static_cast<DWORD>(buffer.size()),
                                    &bytesRead, &ov);
-            
+
             if (!result && GetLastError() == ERROR_IO_PENDING) {
                 DWORD waitResult = WaitForMultipleObjects(2, events, FALSE, INFINITE);
-                
+
                 if (waitResult == WAIT_OBJECT_0) {
                     // Shutdown event
                     CancelIo(handle_);
                     break;
                 } else if (waitResult == WAIT_OBJECT_0 + 1) {
                     if (!GetOverlappedResult(handle_, &ov, &bytesRead, FALSE)) {
-                        std::lock_guard<std::mutex> lock(callbackMutex_);
-                        if (errorCallback_) {
-                            errorCallback_(ErrorCode::ReadFailed, "Read failed in async receive");
+                        ErrorCallback errorCb;
+                        {
+                            std::lock_guard<std::mutex> lock(callbackMutex_);
+                            errorCb = errorCallback_;
+                        }
+                        if (errorCb) {
+                            errorCb(ErrorCode::ReadFailed, "Read failed in async receive");
                         }
                         continue;
                     }
+                } else {
+                    // Wait failed or timeout
+                    continue;
+                }
+            } else if (result) {
+                // Read completed immediately
+                if (!GetOverlappedResult(handle_, &ov, &bytesRead, FALSE)) {
+                    ErrorCallback errorCb;
+                    {
+                        std::lock_guard<std::mutex> lock(callbackMutex_);
+                        errorCb = errorCallback_;
+                    }
+                    if (errorCb) {
+                        errorCb(ErrorCode::ReadFailed, "Read failed in async receive");
+                    }
+                    continue;
+                }
+            } else {
+                // Read failed immediately
+                if (GetLastError() != ERROR_IO_PENDING) {
+                    ErrorCallback errorCb;
+                    {
+                        std::lock_guard<std::mutex> lock(callbackMutex_);
+                        errorCb = errorCallback_;
+                    }
+                    if (errorCb) {
+                        errorCb(ErrorCode::ReadFailed, "Read failed in async receive");
+                    }
+                    // Small delay to prevent busy loop on persistent error
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
                 }
             }
-            
+
             if (bytesRead > 0) {
                 statistics_.bytesReceived += bytesRead;
-                
-                std::lock_guard<std::mutex> lock(callbackMutex_);
-                if (dataCallback_) {
-                    dataCallback_(buffer.data(), bytesRead);
+
+                DataCallback dataCb;
+                EventCallback eventCb;
+                {
+                    std::lock_guard<std::mutex> lock(callbackMutex_);
+                    dataCb = dataCallback_;
+                    eventCb = eventCallback_;
                 }
-                if (eventCallback_) {
-                    eventCallback_(EventType::DataReceived);
+                if (dataCb) {
+                    dataCb(buffer.data(), bytesRead);
+                }
+                if (eventCb) {
+                    eventCb(EventType::DataReceived);
                 }
             }
-            
+
 #elif CSERIALPORT_PLATFORM_LINUX
             fd_set readfds;
             FD_ZERO(&readfds);
             FD_SET(fd_, &readfds);
-            
+
             struct timeval tv;
             tv.tv_sec = 0;
             tv.tv_usec = 100000; // 100ms
-            
+
             int selectResult = select(fd_ + 1, &readfds, nullptr, nullptr, &tv);
-            
+
+            if (!asyncReceiving_) {
+                // Check if we should exit immediately
+                break;
+            }
+
             if (selectResult > 0 && FD_ISSET(fd_, &readfds)) {
                 ssize_t bytesRead = ::read(fd_, buffer.data(), buffer.size());
-                
+
                 if (bytesRead > 0) {
                     statistics_.bytesReceived += bytesRead;
-                    
-                    std::lock_guard<std::mutex> lock(callbackMutex_);
-                    if (dataCallback_) {
-                        dataCallback_(buffer.data(), static_cast<size_t>(bytesRead));
+
+                    DataCallback dataCb;
+                    EventCallback eventCb;
+                    {
+                        std::lock_guard<std::mutex> lock(callbackMutex_);
+                        dataCb = dataCallback_;
+                        eventCb = eventCallback_;
                     }
-                    if (eventCallback_) {
-                        eventCallback_(EventType::DataReceived);
+                    if (dataCb) {
+                        dataCb(buffer.data(), static_cast<size_t>(bytesRead));
                     }
-                } else if (bytesRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                    std::lock_guard<std::mutex> lock(callbackMutex_);
-                    if (errorCallback_) {
-                        errorCallback_(ErrorCode::ReadFailed, "Read failed in async receive");
+                    if (eventCb) {
+                        eventCb(EventType::DataReceived);
                     }
+                } else if (bytesRead == 0) {
+                    // EOF - port closed
+                    ErrorCallback errorCb;
+                    {
+                        std::lock_guard<std::mutex> lock(callbackMutex_);
+                        errorCb = errorCallback_;
+                    }
+                    if (errorCb) {
+                        errorCb(ErrorCode::ReadFailed, "Port closed unexpectedly");
+                    }
+                    break;
+                } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    // Real error
+                    ErrorCallback errorCb;
+                    {
+                        std::lock_guard<std::mutex> lock(callbackMutex_);
+                        errorCb = errorCallback_;
+                    }
+                    if (errorCb) {
+                        errorCb(ErrorCode::ReadFailed, "Read failed in async receive");
+                    }
+                    // Small delay to prevent busy loop
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+            } else if (selectResult < 0) {
+                // Select error
+                if (errno != EINTR) {
+                    ErrorCallback errorCb;
+                    {
+                        std::lock_guard<std::mutex> lock(callbackMutex_);
+                        errorCb = errorCallback_;
+                    }
+                    if (errorCb) {
+                        errorCb(ErrorCode::ReadFailed, "Select failed in async receive");
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }
+            // selectResult == 0 means timeout, continue loop
 #endif
         }
     }
@@ -1085,6 +1191,7 @@ SerialPort::SerialPort() : impl_(std::make_unique<Impl>()) {}
 
 SerialPort::SerialPort(const std::string& portName, const SerialConfig& config)
     : impl_(std::make_unique<Impl>()) {
+    // 注意：构造函数不会抛出异常，用户需要在构造后检查 isOpen() 或使用默认构造 + open()
     impl_->open(portName, config);
 }
 
