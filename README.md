@@ -336,6 +336,11 @@ struct PortStatistics {
     uint64_t getReadErrors() const noexcept;
     uint64_t getWriteErrors() const noexcept;
 
+    // 时间相关方法
+    Duration getUptime() const noexcept;              // 获取运行时长
+    Duration getLastActivityOffset() const noexcept;  // 获取最后活动时间偏移
+    Duration getTimeSinceLastActivity() const noexcept; // 获取自最后活动以来的时间
+
     void reset() noexcept;
 };
 ```

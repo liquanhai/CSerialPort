@@ -38,7 +38,7 @@
 #define ASSERT_EQ(a, b) do { \
     if ((a) != (b)) { \
         std::ostringstream oss; \
-        oss << "Assertion failed: " << #a << " == " << #b << " (" << (a) << " != " << (b) << ")"; \
+        oss << "Assertion failed: " << #a << " == " << #b; \
         throw std::runtime_error(oss.str()); \
     } \
 } while(0)
@@ -191,6 +191,49 @@ TEST_CASE(statistics_copy) {
     csp::PortStatistics stats2(stats1);
     ASSERT_EQ(stats2.getBytesReceived(), 100u);
     ASSERT_EQ(stats2.getBytesSent(), 50u);
+}
+
+TEST_CASE(statistics_timestamps) {
+    csp::PortStatistics stats;
+
+    // 初始状态：运行时长应该很小
+    auto uptime = stats.getUptime();
+    ASSERT_TRUE(uptime.count() >= 0);
+
+    // 初始状态：最后活动时间偏移应该为0
+    auto lastActivityOffset = stats.getLastActivityOffset();
+    ASSERT_EQ(lastActivityOffset.count(), 0);
+
+    // 初始状态：自最后活动以来的时间应该为0（因为尚无活动）
+    auto timeSinceLastActivity = stats.getTimeSinceLastActivity();
+    ASSERT_EQ(timeSinceLastActivity.count(), 0);
+
+    // 更新最后活动时间
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    stats.updateLastActivity();
+
+    // 现在最后活动时间偏移应该大于0
+    lastActivityOffset = stats.getLastActivityOffset();
+    ASSERT_TRUE(lastActivityOffset.count() > 0);
+
+    // 自最后活动以来的时间应该很小
+    timeSinceLastActivity = stats.getTimeSinceLastActivity();
+    ASSERT_TRUE(timeSinceLastActivity.count() >= 0);
+}
+
+TEST_CASE(statistics_reset_timestamps) {
+    csp::PortStatistics stats;
+
+    // 更新活动时间
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    stats.updateLastActivity();
+
+    // 重置
+    stats.reset();
+
+    // 重置后最后活动时间偏移应该为0
+    auto lastActivityOffset = stats.getLastActivityOffset();
+    ASSERT_EQ(lastActivityOffset.count(), 0);
 }
 
 // ============================================================================
@@ -354,6 +397,8 @@ int main() {
     RUN_TEST(statistics_atomic_operations);
     RUN_TEST(statistics_reset);
     RUN_TEST(statistics_copy);
+    RUN_TEST(statistics_timestamps);
+    RUN_TEST(statistics_reset_timestamps);
 
     // SerialError 测试
     std::cout << "\n--- SerialError Tests ---" << std::endl;

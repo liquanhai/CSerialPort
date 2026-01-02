@@ -237,7 +237,10 @@ public:
         
         buffer.resize(bytesRead);
         statistics_.bytesReceived.fetch_add(bytesRead, std::memory_order_relaxed);
-        
+        if (bytesRead > 0) {
+            statistics_.updateLastActivity();
+        }
+
         return Result<ByteBuffer>(std::move(buffer));
     }
     
@@ -416,8 +419,11 @@ public:
         }
         
         statistics_.bytesSent.fetch_add(dwBytesWritten, std::memory_order_relaxed);
+        if (dwBytesWritten > 0) {
+            statistics_.updateLastActivity();
+        }
         return Result<size_t>(static_cast<size_t>(dwBytesWritten));
-        
+
 #elif CSERIALPORT_PLATFORM_LINUX
         fd_set writefds;
         FD_ZERO(&writefds);
@@ -443,10 +449,13 @@ public:
         }
         
         statistics_.bytesSent.fetch_add(result, std::memory_order_relaxed);
+        if (result > 0) {
+            statistics_.updateLastActivity();
+        }
         return Result<size_t>(static_cast<size_t>(result));
 #endif
     }
-    
+
     Result<size_t> write(const ByteBuffer& data, std::optional<Duration> timeout) {
         return write(data.data(), data.size(), timeout);
     }
@@ -1190,9 +1199,10 @@ private:
     }
     
     void receiveThreadFunc() {
-        ByteBuffer buffer(1024);
+        try {
+            ByteBuffer buffer(config_.readBufferSize > 0 ? config_.readBufferSize : 4096);
 
-        while (asyncReceiving_) {
+            while (asyncReceiving_) {
 #if CSERIALPORT_PLATFORM_WINDOWS
             HANDLE events[2] = { shutdownEvent_, readEvent_ };
 
@@ -1259,6 +1269,7 @@ private:
 
             if (bytesRead > 0) {
                 statistics_.bytesReceived.fetch_add(bytesRead, std::memory_order_relaxed);
+                statistics_.updateLastActivity();
 
                 DataCallback dataCb;
                 EventCallback eventCb;
@@ -1296,6 +1307,7 @@ private:
 
                 if (bytesRead > 0) {
                     statistics_.bytesReceived.fetch_add(bytesRead, std::memory_order_relaxed);
+                    statistics_.updateLastActivity();
 
                     DataCallback dataCb;
                     EventCallback eventCb;
@@ -1350,9 +1362,30 @@ private:
             }
             // selectResult == 0 means timeout, continue loop
 #endif
+            }
+        } catch (const std::exception& e) {
+            // 捕获回调函数或其他操作抛出的异常
+            ErrorCallback errorCb;
+            {
+                std::lock_guard<std::mutex> lock(callbackMutex_);
+                errorCb = errorCallback_;
+            }
+            if (errorCb) {
+                errorCb(ErrorCode::Unknown, std::string("Exception in async receive: ") + e.what());
+            }
+        } catch (...) {
+            // 捕获未知异常
+            ErrorCallback errorCb;
+            {
+                std::lock_guard<std::mutex> lock(callbackMutex_);
+                errorCb = errorCallback_;
+            }
+            if (errorCb) {
+                errorCb(ErrorCode::Unknown, "Unknown exception in async receive");
+            }
         }
     }
-    
+
     // 成员变量
     std::string portName_;
     SerialConfig config_;

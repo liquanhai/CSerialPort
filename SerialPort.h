@@ -252,19 +252,29 @@ struct PortInfo {
  * @brief 串口统计信息（线程安全）
  */
 struct PortStatistics {
+    using TimePoint = std::chrono::steady_clock::time_point;
+
     std::atomic<uint64_t> bytesReceived{0};
     std::atomic<uint64_t> bytesSent{0};
     std::atomic<uint64_t> readErrors{0};
     std::atomic<uint64_t> writeErrors{0};
 
-    PortStatistics() = default;
+    // 时间戳（非原子，但通过互斥锁保护或仅在单线程中更新）
+    TimePoint startTime;
+    std::atomic<int64_t> lastActivityTime{0};  // 存储为纳秒偏移量
+
+    PortStatistics()
+        : startTime(std::chrono::steady_clock::now())
+        , lastActivityTime(0) {}
 
     // 拷贝构造函数（用于返回统计信息副本）
     PortStatistics(const PortStatistics& other) noexcept
         : bytesReceived(other.bytesReceived.load(std::memory_order_relaxed))
         , bytesSent(other.bytesSent.load(std::memory_order_relaxed))
         , readErrors(other.readErrors.load(std::memory_order_relaxed))
-        , writeErrors(other.writeErrors.load(std::memory_order_relaxed)) {}
+        , writeErrors(other.writeErrors.load(std::memory_order_relaxed))
+        , startTime(other.startTime)
+        , lastActivityTime(other.lastActivityTime.load(std::memory_order_relaxed)) {}
 
     // 拷贝赋值运算符
     PortStatistics& operator=(const PortStatistics& other) noexcept {
@@ -273,6 +283,8 @@ struct PortStatistics {
             bytesSent.store(other.bytesSent.load(std::memory_order_relaxed), std::memory_order_relaxed);
             readErrors.store(other.readErrors.load(std::memory_order_relaxed), std::memory_order_relaxed);
             writeErrors.store(other.writeErrors.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            startTime = other.startTime;
+            lastActivityTime.store(other.lastActivityTime.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
     }
@@ -282,6 +294,15 @@ struct PortStatistics {
         bytesSent.store(0, std::memory_order_relaxed);
         readErrors.store(0, std::memory_order_relaxed);
         writeErrors.store(0, std::memory_order_relaxed);
+        startTime = std::chrono::steady_clock::now();
+        lastActivityTime.store(0, std::memory_order_relaxed);
+    }
+
+    // 更新最后活动时间
+    void updateLastActivity() noexcept {
+        auto now = std::chrono::steady_clock::now();
+        auto offset = std::chrono::duration_cast<std::chrono::nanoseconds>(now - startTime).count();
+        lastActivityTime.store(offset, std::memory_order_relaxed);
     }
 
     // 便捷的获取方法
@@ -289,6 +310,29 @@ struct PortStatistics {
     uint64_t getBytesSent() const noexcept { return bytesSent.load(std::memory_order_relaxed); }
     uint64_t getReadErrors() const noexcept { return readErrors.load(std::memory_order_relaxed); }
     uint64_t getWriteErrors() const noexcept { return writeErrors.load(std::memory_order_relaxed); }
+
+    // 获取运行时长
+    Duration getUptime() const noexcept {
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<Duration>(now - startTime);
+    }
+
+    // 获取最后活动时间（相对于开始时间的偏移）
+    Duration getLastActivityOffset() const noexcept {
+        return Duration(std::chrono::duration_cast<Duration>(
+            std::chrono::nanoseconds(lastActivityTime.load(std::memory_order_relaxed))));
+    }
+
+    // 获取自最后活动以来的时间
+    Duration getTimeSinceLastActivity() const noexcept {
+        auto offset = lastActivityTime.load(std::memory_order_relaxed);
+        if (offset == 0) {
+            return Duration(0);  // 尚无活动
+        }
+        auto lastActivity = startTime + std::chrono::nanoseconds(offset);
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<Duration>(now - lastActivity);
+    }
 };
 
 // ============================================================================
@@ -499,31 +543,31 @@ public:
     static std::string version() noexcept { return VERSION_STRING; }
     
     // 打开/关闭
-    VoidResult open(const std::string& portName, const SerialConfig& config = SerialConfig::defaultConfig());
-    VoidResult close();
+    [[nodiscard]] VoidResult open(const std::string& portName, const SerialConfig& config = SerialConfig::defaultConfig());
+    [[nodiscard]] VoidResult close();
     bool isOpen() const noexcept;
     
     // 配置
     SerialConfig config() const noexcept;
-    VoidResult setConfig(const SerialConfig& config);
-    VoidResult setBaudRate(BaudRate baudRate);
-    VoidResult setDataBits(DataBits dataBits);
-    VoidResult setStopBits(StopBits stopBits);
-    VoidResult setParity(Parity parity);
-    VoidResult setFlowControl(FlowControl flowControl);
-    VoidResult setReadTimeout(Duration timeout);
-    VoidResult setWriteTimeout(Duration timeout);
-    
+    [[nodiscard]] VoidResult setConfig(const SerialConfig& config);
+    [[nodiscard]] VoidResult setBaudRate(BaudRate baudRate);
+    [[nodiscard]] VoidResult setDataBits(DataBits dataBits);
+    [[nodiscard]] VoidResult setStopBits(StopBits stopBits);
+    [[nodiscard]] VoidResult setParity(Parity parity);
+    [[nodiscard]] VoidResult setFlowControl(FlowControl flowControl);
+    [[nodiscard]] VoidResult setReadTimeout(Duration timeout);
+    [[nodiscard]] VoidResult setWriteTimeout(Duration timeout);
+
     // 同步读写
-    Result<ByteBuffer> read(size_t maxBytes, std::optional<Duration> timeout = std::nullopt);
-    Result<ByteBuffer> readExact(size_t exactBytes, std::optional<Duration> timeout = std::nullopt);
-    Result<ByteBuffer> readUntil(Byte delimiter, size_t maxBytes = 4096, std::optional<Duration> timeout = std::nullopt);
-    Result<std::string> readLine(size_t maxBytes = 4096, std::optional<Duration> timeout = std::nullopt);
-    
-    Result<size_t> write(const Byte* data, size_t size, std::optional<Duration> timeout = std::nullopt);
-    Result<size_t> write(const ByteBuffer& data, std::optional<Duration> timeout = std::nullopt);
-    Result<size_t> write(const std::string& str, std::optional<Duration> timeout = std::nullopt);
-    Result<size_t> writeLine(const std::string& line, std::optional<Duration> timeout = std::nullopt);
+    [[nodiscard]] Result<ByteBuffer> read(size_t maxBytes, std::optional<Duration> timeout = std::nullopt);
+    [[nodiscard]] Result<ByteBuffer> readExact(size_t exactBytes, std::optional<Duration> timeout = std::nullopt);
+    [[nodiscard]] Result<ByteBuffer> readUntil(Byte delimiter, size_t maxBytes = 4096, std::optional<Duration> timeout = std::nullopt);
+    [[nodiscard]] Result<std::string> readLine(size_t maxBytes = 4096, std::optional<Duration> timeout = std::nullopt);
+
+    [[nodiscard]] Result<size_t> write(const Byte* data, size_t size, std::optional<Duration> timeout = std::nullopt);
+    [[nodiscard]] Result<size_t> write(const ByteBuffer& data, std::optional<Duration> timeout = std::nullopt);
+    [[nodiscard]] Result<size_t> write(const std::string& str, std::optional<Duration> timeout = std::nullopt);
+    [[nodiscard]] Result<size_t> writeLine(const std::string& line, std::optional<Duration> timeout = std::nullopt);
     
     // 异步读写
     std::future<Result<ByteBuffer>> readAsync(size_t maxBytes);
@@ -534,26 +578,26 @@ public:
     void setDataCallback(DataCallback callback);
     void setEventCallback(EventCallback callback);
     void setErrorCallback(ErrorCallback callback);
-    VoidResult startAsyncReceive();
+    [[nodiscard]] VoidResult startAsyncReceive();
     void stopAsyncReceive();
     bool isAsyncReceiving() const noexcept;
-    
+
     // 缓冲区操作
-    Result<size_t> available() const;
-    VoidResult flushInput();
-    VoidResult flushOutput();
-    VoidResult flush();
-    
+    [[nodiscard]] Result<size_t> available() const;
+    [[nodiscard]] VoidResult flushInput();
+    [[nodiscard]] VoidResult flushOutput();
+    [[nodiscard]] VoidResult flush();
+
     // 控制线
-    VoidResult setDTR(bool state);
-    VoidResult setRTS(bool state);
-    Result<bool> getCTS() const;
-    Result<bool> getDSR() const;
-    Result<bool> getCD() const;
-    Result<bool> getRI() const;
+    [[nodiscard]] VoidResult setDTR(bool state);
+    [[nodiscard]] VoidResult setRTS(bool state);
+    [[nodiscard]] Result<bool> getCTS() const;
+    [[nodiscard]] Result<bool> getDSR() const;
+    [[nodiscard]] Result<bool> getCD() const;
+    [[nodiscard]] Result<bool> getRI() const;
 
     // Break 信号
-    VoidResult sendBreak(Duration duration = Duration(250));
+    [[nodiscard]] VoidResult sendBreak(Duration duration = Duration(250));
     
     // 状态
     std::string portName() const noexcept;
