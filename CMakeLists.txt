@@ -37,16 +37,13 @@ option(CSERIALPORT_BUILD_TESTS "Build tests" OFF)
 # ============================================================================
 if(WIN32)
     set(CSERIALPORT_PLATFORM "Windows")
-    add_definitions(-DCSERIALPORT_PLATFORM_WINDOWS=1)
-    add_definitions(-DCSERIALPORT_PLATFORM_LINUX=0)
+    set(CSERIALPORT_PLATFORM_DEFS CSERIALPORT_PLATFORM_WINDOWS=1 CSERIALPORT_PLATFORM_LINUX=0)
 elseif(UNIX AND NOT APPLE)
     set(CSERIALPORT_PLATFORM "Linux")
-    add_definitions(-DCSERIALPORT_PLATFORM_WINDOWS=0)
-    add_definitions(-DCSERIALPORT_PLATFORM_LINUX=1)
+    set(CSERIALPORT_PLATFORM_DEFS CSERIALPORT_PLATFORM_WINDOWS=0 CSERIALPORT_PLATFORM_LINUX=1)
 elseif(APPLE)
     set(CSERIALPORT_PLATFORM "macOS")
-    add_definitions(-DCSERIALPORT_PLATFORM_WINDOWS=0)
-    add_definitions(-DCSERIALPORT_PLATFORM_LINUX=1)
+    set(CSERIALPORT_PLATFORM_DEFS CSERIALPORT_PLATFORM_WINDOWS=0 CSERIALPORT_PLATFORM_LINUX=1)
     message(WARNING "macOS is treated as Linux-like platform for serial port access")
 else()
     message(FATAL_ERROR "Unsupported platform")
@@ -86,7 +83,9 @@ endif()
 # ============================================================================
 if(CSERIALPORT_BUILD_STATIC)
     add_library(cserialport_static STATIC ${CSERIALPORT_SOURCES} ${CSERIALPORT_HEADERS})
-    
+
+    target_compile_definitions(cserialport_static PUBLIC ${CSERIALPORT_PLATFORM_DEFS} CSERIALPORT_STATIC)
+
     target_include_directories(cserialport_static
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -114,7 +113,9 @@ endif()
 # ============================================================================
 if(CSERIALPORT_BUILD_SHARED)
     add_library(cserialport_shared SHARED ${CSERIALPORT_SOURCES} ${CSERIALPORT_HEADERS})
-    
+
+    target_compile_definitions(cserialport_shared PUBLIC ${CSERIALPORT_PLATFORM_DEFS})
+
     target_include_directories(cserialport_shared
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>

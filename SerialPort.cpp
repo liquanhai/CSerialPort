@@ -101,7 +101,7 @@ public:
         
 #elif CSERIALPORT_PLATFORM_LINUX
         fd_ = ::open(portName.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        
+
         if (fd_ < 0) {
             if (errno == ENOENT) {
                 return VoidResult(ErrorCode::PortNotFound, "Port not found: " + portName);
@@ -112,11 +112,17 @@ public:
             }
             return VoidResult(ErrorCode::OpenFailed, "Failed to open port: " + portName);
         }
-        
+
         if (tcgetattr(fd_, &originalTermios_) != 0) {
             ::close(fd_);
             fd_ = -1;
             return VoidResult(ErrorCode::ConfigFailed, "Failed to get terminal attributes");
+        }
+
+        // 清除非阻塞标志，使用 select() 进行超时控制
+        int flags = fcntl(fd_, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(fd_, F_SETFL, flags & ~O_NONBLOCK);
         }
 #endif
         
@@ -285,11 +291,6 @@ public:
         ByteBuffer result;
         result.reserve(std::min(maxBytes, static_cast<size_t>(256)));
 
-        // 内部缓冲区用于批量读取
-        ByteBuffer readBuffer(128);
-        size_t bufferPos = 0;
-        size_t bufferLen = 0;
-
         auto startTime = std::chrono::steady_clock::now();
         Duration actualTimeout = timeout.value_or(config_.readTimeout);
 
@@ -298,28 +299,14 @@ public:
                 std::chrono::steady_clock::now() - startTime);
 
             if (elapsed >= actualTimeout) {
-                // 如果已经读取了一些数据，返回它们而不是报错
                 if (!result.empty()) {
                     break;
                 }
                 return Result<ByteBuffer>(ErrorCode::Timeout, "Read until timeout");
             }
 
-            // 如果缓冲区中还有数据，先处理缓冲区
-            if (bufferPos < bufferLen) {
-                while (bufferPos < bufferLen && result.size() < maxBytes) {
-                    Byte b = readBuffer[bufferPos++];
-                    result.push_back(b);
-                    if (b == delimiter) {
-                        return Result<ByteBuffer>(std::move(result));
-                    }
-                }
-                continue;
-            }
-
-            // 缓冲区为空，读取更多数据
             Duration remainingTimeout = actualTimeout - elapsed;
-            size_t bytesToRead = std::min(readBuffer.size(), maxBytes - result.size());
+            size_t bytesToRead = std::min(static_cast<size_t>(256), maxBytes - result.size());
 
             auto readResult = readInternal(bytesToRead, remainingTimeout);
             if (!readResult) {
@@ -334,7 +321,6 @@ public:
                 continue;
             }
 
-            // 在读取的数据中查找分隔符
             for (size_t i = 0; i < data.size() && result.size() < maxBytes; ++i) {
                 result.push_back(data[i]);
                 if (data[i] == delimiter) {
@@ -375,85 +361,135 @@ public:
     
     Result<size_t> write(const Byte* data, size_t size, std::optional<Duration> timeout) {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
         if (!isOpen_) {
             return Result<size_t>(ErrorCode::NotOpen, "Port is not open");
         }
-        
-        if (data == nullptr || size == 0) {
+
+        if (data == nullptr && size > 0) {
+            return Result<size_t>(ErrorCode::InvalidParameter, "Null data pointer");
+        }
+        if (size == 0) {
             return Result<size_t>(static_cast<size_t>(0));
         }
-        
+
         Duration actualTimeout = timeout.value_or(config_.writeTimeout);
-        
+        auto startTime = std::chrono::steady_clock::now();
+        size_t totalWritten = 0;
+
+        while (totalWritten < size) {
+            auto elapsed = std::chrono::duration_cast<Duration>(
+                std::chrono::steady_clock::now() - startTime);
+            if (elapsed >= actualTimeout) {
+                if (totalWritten > 0) {
+                    statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+                    statistics_.updateLastActivity();
+                    return Result<size_t>(totalWritten);
+                }
+                return Result<size_t>(ErrorCode::Timeout, "Write timeout");
+            }
+
+            Duration remainingTimeout = actualTimeout - elapsed;
+            const Byte* remainingData = data + totalWritten;
+            size_t remainingSize = size - totalWritten;
+
 #if CSERIALPORT_PLATFORM_WINDOWS
-        OVERLAPPED ov = {};
-        ov.hEvent = writeEvent_;
-        ResetEvent(writeEvent_);
-        
-        DWORD dwBytesWritten = 0;
-        BOOL result = WriteFile(handle_, data, static_cast<DWORD>(size), 
-                                &dwBytesWritten, &ov);
-        
-        if (!result) {
-            if (GetLastError() == ERROR_IO_PENDING) {
-                DWORD waitResult = WaitForSingleObject(writeEvent_, 
-                    static_cast<DWORD>(actualTimeout.count()));
-                
-                if (waitResult == WAIT_TIMEOUT) {
-                    CancelIo(handle_);
-                    return Result<size_t>(ErrorCode::Timeout, "Write timeout");
-                } else if (waitResult == WAIT_OBJECT_0) {
-                    if (!GetOverlappedResult(handle_, &ov, &dwBytesWritten, FALSE)) {
+            OVERLAPPED ov = {};
+            ov.hEvent = writeEvent_;
+            ResetEvent(writeEvent_);
+
+            DWORD dwBytesWritten = 0;
+            BOOL result = WriteFile(handle_, remainingData, static_cast<DWORD>(remainingSize),
+                                    &dwBytesWritten, &ov);
+
+            if (!result) {
+                if (GetLastError() == ERROR_IO_PENDING) {
+                    DWORD waitResult = WaitForSingleObject(writeEvent_,
+                        static_cast<DWORD>(remainingTimeout.count()));
+
+                    if (waitResult == WAIT_TIMEOUT) {
+                        CancelIo(handle_);
+                        if (totalWritten > 0) {
+                            statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+                            statistics_.updateLastActivity();
+                            return Result<size_t>(totalWritten);
+                        }
+                        return Result<size_t>(ErrorCode::Timeout, "Write timeout");
+                    } else if (waitResult == WAIT_OBJECT_0) {
+                        if (!GetOverlappedResult(handle_, &ov, &dwBytesWritten, FALSE)) {
+                            statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
+                            if (totalWritten > 0) {
+                                statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+                                return Result<size_t>(totalWritten);
+                            }
+                            return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
+                        }
+                    } else {
                         statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
-                        return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
+                        if (totalWritten > 0) {
+                            statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+                            return Result<size_t>(totalWritten);
+                        }
+                        return Result<size_t>(ErrorCode::WriteFailed, "Wait failed");
                     }
                 } else {
                     statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
-                    return Result<size_t>(ErrorCode::WriteFailed, "Wait failed");
+                    if (totalWritten > 0) {
+                        statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+                        return Result<size_t>(totalWritten);
+                    }
+                    return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
                 }
-            } else {
-                statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
-                return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
             }
-        }
-        
-        statistics_.bytesSent.fetch_add(dwBytesWritten, std::memory_order_relaxed);
-        if (dwBytesWritten > 0) {
-            statistics_.updateLastActivity();
-        }
-        return Result<size_t>(static_cast<size_t>(dwBytesWritten));
+
+            totalWritten += dwBytesWritten;
 
 #elif CSERIALPORT_PLATFORM_LINUX
-        fd_set writefds;
-        FD_ZERO(&writefds);
-        FD_SET(fd_, &writefds);
-        
-        struct timeval tv;
-        tv.tv_sec = actualTimeout.count() / 1000;
-        tv.tv_usec = (actualTimeout.count() % 1000) * 1000;
-        
-        int selectResult = select(fd_ + 1, nullptr, &writefds, nullptr, &tv);
-        
-        if (selectResult < 0) {
-            statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
-            return Result<size_t>(ErrorCode::WriteFailed, "Select failed");
-        } else if (selectResult == 0) {
-            return Result<size_t>(ErrorCode::Timeout, "Write timeout");
+            fd_set writefds;
+            FD_ZERO(&writefds);
+            FD_SET(fd_, &writefds);
+
+            struct timeval tv;
+            tv.tv_sec = remainingTimeout.count() / 1000;
+            tv.tv_usec = (remainingTimeout.count() % 1000) * 1000;
+
+            int selectResult = select(fd_ + 1, nullptr, &writefds, nullptr, &tv);
+
+            if (selectResult < 0) {
+                statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
+                if (totalWritten > 0) {
+                    statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+                    return Result<size_t>(totalWritten);
+                }
+                return Result<size_t>(ErrorCode::WriteFailed, "Select failed");
+            } else if (selectResult == 0) {
+                if (totalWritten > 0) {
+                    statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+                    statistics_.updateLastActivity();
+                    return Result<size_t>(totalWritten);
+                }
+                return Result<size_t>(ErrorCode::Timeout, "Write timeout");
+            }
+
+            ssize_t result = ::write(fd_, remainingData, remainingSize);
+            if (result < 0) {
+                statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
+                if (totalWritten > 0) {
+                    statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+                    return Result<size_t>(totalWritten);
+                }
+                return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
+            }
+
+            totalWritten += static_cast<size_t>(result);
+#endif
         }
-        
-        ssize_t result = ::write(fd_, data, size);
-        if (result < 0) {
-            statistics_.writeErrors.fetch_add(1, std::memory_order_relaxed);
-            return Result<size_t>(ErrorCode::WriteFailed, "Write failed");
-        }
-        
-        statistics_.bytesSent.fetch_add(result, std::memory_order_relaxed);
-        if (result > 0) {
+
+        statistics_.bytesSent.fetch_add(totalWritten, std::memory_order_relaxed);
+        if (totalWritten > 0) {
             statistics_.updateLastActivity();
         }
-        return Result<size_t>(static_cast<size_t>(result));
-#endif
+        return Result<size_t>(totalWritten);
     }
 
     Result<size_t> write(const ByteBuffer& data, std::optional<Duration> timeout) {
@@ -544,12 +580,13 @@ public:
     // ========================================================================
     // 缓冲区操作
     // ========================================================================
-    
+
     Result<size_t> available() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return Result<size_t>(ErrorCode::NotOpen, "Port is not open");
         }
-        
+
 #if CSERIALPORT_PLATFORM_WINDOWS
         COMSTAT comstat;
         DWORD errors;
@@ -557,7 +594,7 @@ public:
             return Result<size_t>(ErrorCode::ReadFailed, "Failed to get available bytes");
         }
         return Result<size_t>(static_cast<size_t>(comstat.cbInQue));
-        
+
 #elif CSERIALPORT_PLATFORM_LINUX
         int bytes = 0;
         if (ioctl(fd_, FIONREAD, &bytes) < 0) {
@@ -566,12 +603,13 @@ public:
         return Result<size_t>(static_cast<size_t>(bytes));
 #endif
     }
-    
+
     VoidResult flushInput() {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return VoidResult(ErrorCode::NotOpen, "Port is not open");
         }
-        
+
 #if CSERIALPORT_PLATFORM_WINDOWS
         if (!PurgeComm(handle_, PURGE_RXCLEAR | PURGE_RXABORT)) {
             return VoidResult(ErrorCode::ReadFailed, "Failed to flush input");
@@ -583,12 +621,13 @@ public:
 #endif
         return VoidResult();
     }
-    
+
     VoidResult flushOutput() {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return VoidResult(ErrorCode::NotOpen, "Port is not open");
         }
-        
+
 #if CSERIALPORT_PLATFORM_WINDOWS
         if (!PurgeComm(handle_, PURGE_TXCLEAR | PURGE_TXABORT)) {
             return VoidResult(ErrorCode::WriteFailed, "Failed to flush output");
@@ -600,22 +639,33 @@ public:
 #endif
         return VoidResult();
     }
-    
+
     VoidResult flush() {
-        auto result = flushInput();
-        if (!result) return result;
-        return flushOutput();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!isOpen_) {
+            return VoidResult(ErrorCode::NotOpen, "Port is not open");
+        }
+
+#if CSERIALPORT_PLATFORM_WINDOWS
+        if (!PurgeComm(handle_, PURGE_RXCLEAR | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_TXABORT)) {
+            return VoidResult(ErrorCode::WriteFailed, "Failed to flush");
+        }
+#elif CSERIALPORT_PLATFORM_LINUX
+        tcflush(fd_, TCIOFLUSH);
+#endif
+        return VoidResult();
     }
     
     // ========================================================================
     // 控制线
     // ========================================================================
-    
+
     VoidResult setDTR(bool state) {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return VoidResult(ErrorCode::NotOpen, "Port is not open");
         }
-        
+
 #if CSERIALPORT_PLATFORM_WINDOWS
         if (!EscapeCommFunction(handle_, state ? SETDTR : CLRDTR)) {
             return VoidResult(ErrorCode::ConfigFailed, "Failed to set DTR");
@@ -636,12 +686,13 @@ public:
 #endif
         return VoidResult();
     }
-    
+
     VoidResult setRTS(bool state) {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return VoidResult(ErrorCode::NotOpen, "Port is not open");
         }
-        
+
 #if CSERIALPORT_PLATFORM_WINDOWS
         if (!EscapeCommFunction(handle_, state ? SETRTS : CLRRTS)) {
             return VoidResult(ErrorCode::ConfigFailed, "Failed to set RTS");
@@ -664,6 +715,7 @@ public:
     }
 
     Result<bool> getCTS() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return Result<bool>(ErrorCode::NotOpen, "Port is not open");
         }
@@ -684,6 +736,7 @@ public:
     }
 
     Result<bool> getDSR() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return Result<bool>(ErrorCode::NotOpen, "Port is not open");
         }
@@ -704,6 +757,7 @@ public:
     }
 
     Result<bool> getCD() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return Result<bool>(ErrorCode::NotOpen, "Port is not open");
         }
@@ -724,6 +778,7 @@ public:
     }
 
     Result<bool> getRI() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return Result<bool>(ErrorCode::NotOpen, "Port is not open");
         }
@@ -744,6 +799,7 @@ public:
     }
 
     VoidResult sendBreak(Duration duration) {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isOpen_) {
             return VoidResult(ErrorCode::NotOpen, "Port is not open");
         }
@@ -1423,7 +1479,12 @@ SerialPort::SerialPort() : impl_(std::make_unique<Impl>()) {}
 SerialPort::~SerialPort() = default;
 
 SerialPort::SerialPort(SerialPort&& other) noexcept = default;
-SerialPort& SerialPort::operator=(SerialPort&& other) noexcept = default;
+SerialPort& SerialPort::operator=(SerialPort&& other) noexcept {
+    if (this != &other) {
+        impl_ = std::move(other.impl_);
+    }
+    return *this;
+}
 
 std::vector<PortInfo> SerialPort::enumerate() {
     return Impl::enumerate();
@@ -1434,189 +1495,237 @@ bool SerialPort::exists(const std::string& portName) {
 }
 
 VoidResult SerialPort::open(const std::string& portName, const SerialConfig& config) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->open(portName, config);
 }
 
 VoidResult SerialPort::close() {
+    if (!impl_) return VoidResult();
     return impl_->close();
 }
 
 bool SerialPort::isOpen() const noexcept {
-    return impl_->isOpen();
+    return impl_ ? impl_->isOpen() : false;
 }
 
 SerialConfig SerialPort::config() const noexcept {
+    if (!impl_) return SerialConfig{};
     return impl_->config();
 }
 
 VoidResult SerialPort::setConfig(const SerialConfig& config) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->setConfig(config);
 }
 
 VoidResult SerialPort::setBaudRate(BaudRate baudRate) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     auto cfg = impl_->config();
     cfg.baudRate = baudRate;
     return impl_->setConfig(cfg);
 }
 
 VoidResult SerialPort::setDataBits(DataBits dataBits) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     auto cfg = impl_->config();
     cfg.dataBits = dataBits;
     return impl_->setConfig(cfg);
 }
 
 VoidResult SerialPort::setStopBits(StopBits stopBits) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     auto cfg = impl_->config();
     cfg.stopBits = stopBits;
     return impl_->setConfig(cfg);
 }
 
 VoidResult SerialPort::setParity(Parity parity) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     auto cfg = impl_->config();
     cfg.parity = parity;
     return impl_->setConfig(cfg);
 }
 
 VoidResult SerialPort::setFlowControl(FlowControl flowControl) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     auto cfg = impl_->config();
     cfg.flowControl = flowControl;
     return impl_->setConfig(cfg);
 }
 
 VoidResult SerialPort::setReadTimeout(Duration timeout) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     auto cfg = impl_->config();
     cfg.readTimeout = timeout;
     return impl_->setConfig(cfg);
 }
 
 VoidResult SerialPort::setWriteTimeout(Duration timeout) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     auto cfg = impl_->config();
     cfg.writeTimeout = timeout;
     return impl_->setConfig(cfg);
 }
 
 Result<ByteBuffer> SerialPort::read(size_t maxBytes, std::optional<Duration> timeout) {
+    if (!impl_) return Result<ByteBuffer>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->read(maxBytes, timeout);
 }
 
 Result<ByteBuffer> SerialPort::readExact(size_t exactBytes, std::optional<Duration> timeout) {
+    if (!impl_) return Result<ByteBuffer>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->readExact(exactBytes, timeout);
 }
 
 Result<ByteBuffer> SerialPort::readUntil(Byte delimiter, size_t maxBytes, std::optional<Duration> timeout) {
+    if (!impl_) return Result<ByteBuffer>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->readUntil(delimiter, maxBytes, timeout);
 }
 
 Result<std::string> SerialPort::readLine(size_t maxBytes, std::optional<Duration> timeout) {
+    if (!impl_) return Result<std::string>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->readLine(maxBytes, timeout);
 }
 
 Result<size_t> SerialPort::write(const Byte* data, size_t size, std::optional<Duration> timeout) {
+    if (!impl_) return Result<size_t>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->write(data, size, timeout);
 }
 
 Result<size_t> SerialPort::write(const ByteBuffer& data, std::optional<Duration> timeout) {
+    if (!impl_) return Result<size_t>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->write(data, timeout);
 }
 
 Result<size_t> SerialPort::write(const std::string& str, std::optional<Duration> timeout) {
+    if (!impl_) return Result<size_t>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->write(str, timeout);
 }
 
 Result<size_t> SerialPort::writeLine(const std::string& line, std::optional<Duration> timeout) {
+    if (!impl_) return Result<size_t>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->writeLine(line, timeout);
 }
 
 std::future<Result<ByteBuffer>> SerialPort::readAsync(size_t maxBytes) {
+    if (!impl_) {
+        std::promise<Result<ByteBuffer>> p;
+        p.set_value(Result<ByteBuffer>(ErrorCode::NotOpen, "Port object is invalid"));
+        return p.get_future();
+    }
     return impl_->readAsync(maxBytes);
 }
 
 std::future<Result<size_t>> SerialPort::writeAsync(ByteBuffer data) {
+    if (!impl_) {
+        std::promise<Result<size_t>> p;
+        p.set_value(Result<size_t>(ErrorCode::NotOpen, "Port object is invalid"));
+        return p.get_future();
+    }
     return impl_->writeAsync(std::move(data));
 }
 
 std::future<Result<size_t>> SerialPort::writeAsync(std::string str) {
+    if (!impl_) {
+        std::promise<Result<size_t>> p;
+        p.set_value(Result<size_t>(ErrorCode::NotOpen, "Port object is invalid"));
+        return p.get_future();
+    }
     return impl_->writeAsync(std::move(str));
 }
 
 void SerialPort::setDataCallback(DataCallback callback) {
-    impl_->setDataCallback(std::move(callback));
+    if (impl_) impl_->setDataCallback(std::move(callback));
 }
 
 void SerialPort::setEventCallback(EventCallback callback) {
-    impl_->setEventCallback(std::move(callback));
+    if (impl_) impl_->setEventCallback(std::move(callback));
 }
 
 void SerialPort::setErrorCallback(ErrorCallback callback) {
-    impl_->setErrorCallback(std::move(callback));
+    if (impl_) impl_->setErrorCallback(std::move(callback));
 }
 
 VoidResult SerialPort::startAsyncReceive() {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->startAsyncReceive();
 }
 
 void SerialPort::stopAsyncReceive() {
-    impl_->stopAsyncReceive();
+    if (impl_) impl_->stopAsyncReceive();
 }
 
 bool SerialPort::isAsyncReceiving() const noexcept {
-    return impl_->isAsyncReceiving();
+    return impl_ ? impl_->isAsyncReceiving() : false;
 }
 
 Result<size_t> SerialPort::available() const {
+    if (!impl_) return Result<size_t>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->available();
 }
 
 VoidResult SerialPort::flushInput() {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->flushInput();
 }
 
 VoidResult SerialPort::flushOutput() {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->flushOutput();
 }
 
 VoidResult SerialPort::flush() {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->flush();
 }
 
 VoidResult SerialPort::setDTR(bool state) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->setDTR(state);
 }
 
 VoidResult SerialPort::setRTS(bool state) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->setRTS(state);
 }
 
 Result<bool> SerialPort::getCTS() const {
+    if (!impl_) return Result<bool>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->getCTS();
 }
 
 Result<bool> SerialPort::getDSR() const {
+    if (!impl_) return Result<bool>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->getDSR();
 }
 
 Result<bool> SerialPort::getCD() const {
+    if (!impl_) return Result<bool>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->getCD();
 }
 
 Result<bool> SerialPort::getRI() const {
+    if (!impl_) return Result<bool>(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->getRI();
 }
 
 VoidResult SerialPort::sendBreak(Duration duration) {
+    if (!impl_) return VoidResult(ErrorCode::NotOpen, "Port object is invalid");
     return impl_->sendBreak(duration);
 }
 
 std::string SerialPort::portName() const noexcept {
+    if (!impl_) return {};
     return impl_->portName();
 }
 
 PortStatistics SerialPort::statistics() const noexcept {
+    if (!impl_) return PortStatistics{};
     return impl_->statistics();
 }
 
 void SerialPort::resetStatistics() noexcept {
-    impl_->resetStatistics();
+    if (impl_) impl_->resetStatistics();
 }
 
 } // namespace csp

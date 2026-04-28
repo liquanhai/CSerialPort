@@ -36,6 +36,21 @@
 #endif
 
 // ============================================================================
+// DLL 导出宏
+// ============================================================================
+#if CSERIALPORT_PLATFORM_WINDOWS
+    #if defined(CSERIALPORT_STATIC)
+        #define CSERIALPORT_API
+    #elif defined(CSERIALPORT_EXPORTS)
+        #define CSERIALPORT_API __declspec(dllexport)
+    #else
+        #define CSERIALPORT_API __declspec(dllimport)
+    #endif
+#else
+    #define CSERIALPORT_API
+#endif
+
+// ============================================================================
 // 标准库头文件
 // ============================================================================
 #include <string>
@@ -252,38 +267,35 @@ struct PortInfo {
  * @brief 串口统计信息（线程安全）
  */
 struct PortStatistics {
-    using TimePoint = std::chrono::steady_clock::time_point;
-
     std::atomic<uint64_t> bytesReceived{0};
     std::atomic<uint64_t> bytesSent{0};
     std::atomic<uint64_t> readErrors{0};
     std::atomic<uint64_t> writeErrors{0};
 
-    // 时间戳（非原子，但通过互斥锁保护或仅在单线程中更新）
-    TimePoint startTime;
-    std::atomic<int64_t> lastActivityTime{0};  // 存储为纳秒偏移量
+    // 使用原子纳秒偏移量存储开始时间，避免数据竞争
+    std::atomic<int64_t> startTimeNs{0};
+    std::atomic<int64_t> lastActivityTime{0};
 
     PortStatistics()
-        : startTime(std::chrono::steady_clock::now())
+        : startTimeNs(std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now().time_since_epoch()).count())
         , lastActivityTime(0) {}
 
-    // 拷贝构造函数（用于返回统计信息副本）
     PortStatistics(const PortStatistics& other) noexcept
         : bytesReceived(other.bytesReceived.load(std::memory_order_relaxed))
         , bytesSent(other.bytesSent.load(std::memory_order_relaxed))
         , readErrors(other.readErrors.load(std::memory_order_relaxed))
         , writeErrors(other.writeErrors.load(std::memory_order_relaxed))
-        , startTime(other.startTime)
+        , startTimeNs(other.startTimeNs.load(std::memory_order_relaxed))
         , lastActivityTime(other.lastActivityTime.load(std::memory_order_relaxed)) {}
 
-    // 拷贝赋值运算符
     PortStatistics& operator=(const PortStatistics& other) noexcept {
         if (this != &other) {
             bytesReceived.store(other.bytesReceived.load(std::memory_order_relaxed), std::memory_order_relaxed);
             bytesSent.store(other.bytesSent.load(std::memory_order_relaxed), std::memory_order_relaxed);
             readErrors.store(other.readErrors.load(std::memory_order_relaxed), std::memory_order_relaxed);
             writeErrors.store(other.writeErrors.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            startTime = other.startTime;
+            startTimeNs.store(other.startTimeNs.load(std::memory_order_relaxed), std::memory_order_relaxed);
             lastActivityTime.store(other.lastActivityTime.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
@@ -294,44 +306,45 @@ struct PortStatistics {
         bytesSent.store(0, std::memory_order_relaxed);
         readErrors.store(0, std::memory_order_relaxed);
         writeErrors.store(0, std::memory_order_relaxed);
-        startTime = std::chrono::steady_clock::now();
+        startTimeNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
         lastActivityTime.store(0, std::memory_order_relaxed);
     }
 
-    // 更新最后活动时间
     void updateLastActivity() noexcept {
-        auto now = std::chrono::steady_clock::now();
-        auto offset = std::chrono::duration_cast<std::chrono::nanoseconds>(now - startTime).count();
-        lastActivityTime.store(offset, std::memory_order_relaxed);
+        auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto start = startTimeNs.load(std::memory_order_relaxed);
+        lastActivityTime.store(nowNs - start, std::memory_order_relaxed);
     }
 
-    // 便捷的获取方法
     uint64_t getBytesReceived() const noexcept { return bytesReceived.load(std::memory_order_relaxed); }
     uint64_t getBytesSent() const noexcept { return bytesSent.load(std::memory_order_relaxed); }
     uint64_t getReadErrors() const noexcept { return readErrors.load(std::memory_order_relaxed); }
     uint64_t getWriteErrors() const noexcept { return writeErrors.load(std::memory_order_relaxed); }
 
-    // 获取运行时长
     Duration getUptime() const noexcept {
-        auto now = std::chrono::steady_clock::now();
-        return std::chrono::duration_cast<Duration>(now - startTime);
+        auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto start = startTimeNs.load(std::memory_order_relaxed);
+        return std::chrono::duration_cast<Duration>(std::chrono::nanoseconds(nowNs - start));
     }
 
-    // 获取最后活动时间（相对于开始时间的偏移）
     Duration getLastActivityOffset() const noexcept {
         return Duration(std::chrono::duration_cast<Duration>(
             std::chrono::nanoseconds(lastActivityTime.load(std::memory_order_relaxed))));
     }
 
-    // 获取自最后活动以来的时间
     Duration getTimeSinceLastActivity() const noexcept {
         auto offset = lastActivityTime.load(std::memory_order_relaxed);
         if (offset == 0) {
-            return Duration(0);  // 尚无活动
+            return Duration(0);
         }
-        auto lastActivity = startTime + std::chrono::nanoseconds(offset);
-        auto now = std::chrono::steady_clock::now();
-        return std::chrono::duration_cast<Duration>(now - lastActivity);
+        auto start = startTimeNs.load(std::memory_order_relaxed);
+        auto lastActivityNs = start + offset;
+        auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        return std::chrono::duration_cast<Duration>(std::chrono::nanoseconds(nowNs - lastActivityNs));
     }
 };
 
@@ -342,7 +355,7 @@ struct PortStatistics {
 /**
  * @brief 串口错误类
  */
-class SerialError : public std::runtime_error {
+class CSERIALPORT_API SerialError : public std::runtime_error {
 public:
     explicit SerialError(ErrorCode code, const std::string& message = "")
         : std::runtime_error(message.empty() ? errorCodeToString(code) : message)
@@ -383,7 +396,7 @@ private:
  * @brief 操作结果类型
  */
 template<typename T>
-class Result {
+class CSERIALPORT_API Result {
 public:
     Result(const T& value) : value_(value), hasValue_(true) {}
     Result(T&& value) : value_(std::move(value)), hasValue_(true) {}
@@ -460,7 +473,7 @@ private:
  * @brief 无返回值的操作结果特化
  */
 template<>
-class Result<void> {
+class CSERIALPORT_API Result<void> {
 public:
     Result() : hasValue_(true) {}
     Result(ErrorCode code, const std::string& msg = "")
@@ -517,7 +530,7 @@ using VoidResult = Result<void>;
  * @note 使用 open() 方法打开串口，不要使用带参数的构造函数直接打开，
  *       因为构造函数无法返回错误信息。
  */
-class SerialPort {
+class CSERIALPORT_API SerialPort {
 public:
     /**
      * @brief 默认构造函数
